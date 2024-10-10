@@ -1,3 +1,5 @@
+from io import StringIO
+import time
 import logging
 
 import numpy as np
@@ -41,6 +43,9 @@ def extract(ops, bfile, U, device=torch.device('cuda'), progress_bar=None):
 
             X = bfile.padded_batch_to_torch(ibatch, ops)
             stt, amps, Xres = run_matching(ops, X, U, ctc, device=device)
+            if ibatch % 100 == 0:
+                logger.debug(f'1: {stt.min()}')
+
             xfeat = Xres[iCC[:, iU[stt[:,1:2]]],stt[:,:1] + tiwave] @ ops['wPCA'].T
             xfeat += amps * Ucc[:,stt[:,1]]
 
@@ -55,12 +60,20 @@ def extract(ops, bfile, U, device=torch.device('cuda'), progress_bar=None):
             nsp = len(stt) 
             if k+nsp>st.shape[0]:                     
                 st = np.concatenate((st, np.zeros_like(st)), 0)
+                if ibatch % 100 == 0:
+                    logger.debug(f'2: {st[:,0].min()}')
                 tF  = torch.cat((tF,  torch.zeros_like(tF)), 0)
 
             stt = stt.double()
             st[k:k+nsp,0] = ((stt[:,0]-nt) + ibatch * (ops['batch_size'])).cpu().numpy() - nt//2 + ops['nt0min']
+            if ibatch % 100 == 0:
+                logger.debug(f'3: {st[:,0].min()}')
+                logger.debug(f'4: {((stt[:,0]-nt) + ibatch * (ops["batch_size"])).min()}')
+                logger.debug(f'5: {(stt[:,0]-nt).min()}')
             st[k:k+nsp,1] = stt[:,1].cpu().numpy()
             st[k:k+nsp,2] = amps[:,0].cpu().numpy()
+            if ibatch % 100 == 0:
+                logger.debug(f'6: {st[:,0].min()}')
             
             tF[k:k+nsp]  = xfeat.transpose(0,1).cpu()
 
@@ -79,6 +92,8 @@ def extract(ops, bfile, U, device=torch.device('cuda'), progress_bar=None):
     isort = np.argsort(st[:k,0])
     st = st[isort]
     tF = tF[isort]
+
+    logger.debug(f'7: {st[:,0].min()}')
 
     return st, tF, ops
 
