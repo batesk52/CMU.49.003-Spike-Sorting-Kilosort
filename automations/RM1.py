@@ -278,6 +278,54 @@ class kilosort_wrapper:
                         ax.set_xscale('log')
                         ax.set_yscale('log')
                         ax.set_title('loglog')
+                    plt.show()
+
+                try:
+                    probe = ops['probe']
+                    # x and y position of probe sites
+                    xc, yc = probe['xc'], probe['yc']
+                    nc = 16 # number of channels to show
+                    good_units = np.nonzero(contam_pct <= 0.1)[0]
+                    mua_units = np.nonzero(contam_pct > 0.1)[0]
+
+
+                    gstr = ['good', 'mua']
+                    for j in range(2):
+                        try:
+                            print(f'~~~~~~~~~~~~~~ {gstr[j]} units ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~')
+                            print('title = number of spikes from each unit')
+                            print(os.path.basename(folder))
+                            units = good_units if j==0 else mua_units 
+                            fig = plt.figure(figsize=(12,3), dpi=150)
+                            grid = gridspec.GridSpec(2,20, figure=fig, hspace=0.25, wspace=0.5)
+
+                            for k in range(40):
+                                wi = units[np.random.randint(len(units))]
+                                wv = templates[wi].copy()  
+                                cb = chan_best[wi]
+                                nsp = (clu==wi).sum()
+                                
+                                ax = fig.add_subplot(grid[k//20, k%20])
+                                n_chan = wv.shape[-1]
+                                ic0 = max(0, cb-nc//2)
+                                ic1 = min(n_chan, cb+nc//2)
+                                wv = wv[:, ic0:ic1]
+                                x0, y0 = xc[ic0:ic1], yc[ic0:ic1]
+
+                                amp = 4
+                                for ii, (xi,yi) in enumerate(zip(x0,y0)):
+                                    t = np.arange(-wv.shape[0]//2,wv.shape[0]//2,1,'float32')
+                                    t /= wv.shape[0] / 20
+                                    ax.plot(xi + t, yi + wv[:,ii]*amp, lw=0.5, color='k')
+
+                                ax.set_title(f'{nsp}', fontsize='small')
+                                ax.axis('off')
+                            plt.show()
+                        except:
+                            print(f'ERROR: could not plot units for {os.path.basename(folder)}, {gstr[j]}. skipping plot...')
+                except:
+                    print(f'ERROR: could not plot {os.path.basename(folder)}')
+
             except:
                 print(f'ERROR: could not analyze {os.path.basename(folder)}')
-                pass
+                
