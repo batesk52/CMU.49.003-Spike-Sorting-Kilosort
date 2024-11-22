@@ -16,7 +16,11 @@ class Rat:
         self.RAT_ID = RAT_ID
         self.PROBE_DIRECTORY = PROBE_DIRECTORY
         self.DATA_DIRECTORY = DATA_DIRECTORY
-        self.intan_recordings = {}
+        self.intan_recordings_stream0 = {}
+        self.intan_recordings_stream1 = {}
+        self.intan_recordings_stream2 = {}
+        self.intan_recordings_stream3 = {}
+        self.intan_recordings_stream4 = {}
         self.emg_data,self.nerve_cuff_data,self.sc_data = {},{},{}
         self.st_experiment_notes = None
         self.qst_experiment_notes = None
@@ -37,9 +41,6 @@ class Rat:
 
         # importing intan data
         self.import_intan_data()
-        self.get_nerve_cuff_data()  
-        self.get_sc_data()
-        self.get_emg_data()
 
     def import_metadata(self):
         metadata_path = os.path.join(self.DATA_DIRECTORY, self.RAT_ID, f'{self.RAT_ID}_TermExpSchedule.xlsx')
@@ -103,11 +104,38 @@ class Rat:
                 rhd_file_path = os.path.join(folder_path, rhd_file)
                 if os.path.exists(rhd_file_path):
                     # Read the recording and store it in the dictionary
-                    recording = read_intan(rhd_file_path, stream_id='0')
-                    self.intan_recordings[folder_name] = recording
                     print(f'Reading {folder_name}...')
-        return self.intan_recordings
-        
+                    # using a for loop, try to import each stream separately
+                    try:
+                        recording = read_intan(rhd_file_path, stream_id='0')
+                        self.intan_recordings_stream0[folder_name] = recording
+                    except:
+                        print(f'Error reading stream 0 for {folder_name}. continuing...')
+                        pass
+                    try:
+                        recording = read_intan(rhd_file_path, stream_id='1')
+                        self.intan_recordings_stream1[folder_name] = recording
+                    except:
+                        print(f'Error reading stream 1 for {folder_name}. continuing...')
+                        pass
+                    try:
+                        recording = read_intan(rhd_file_path, stream_id='2')
+                        self.intan_recordings_stream2[folder_name] = recording
+                    except:
+                        print(f'Error reading stream 2 for {folder_name}. continuing...')
+                        pass
+                    try:
+                        recording = read_intan(rhd_file_path, stream_id='3')
+                        self.intan_recordings_stream3[folder_name] = recording
+                    except:
+                        print(f'Error reading stream 3 for {folder_name}. continuing...')
+                        pass                   
+                    try:
+                        recording = read_intan(rhd_file_path, stream_id='4')
+                        self.intan_recordings_stream4[folder_name] = recording
+                    except:
+                        print(f'Error reading stream 4 for {folder_name}. continuing...')
+                        pass
     """
     Separate channels according to their function based on channel IDs.
     Channels 0-31: Intraspinal recordings (Neural Nexus probe)
@@ -116,25 +144,25 @@ class Rat:
     """
 
     def get_sc_data(self):
-        for recording in self.intan_recordings:
+        for recording in self.intan_recordings_stream0:
             try:
-                self.sc_data[recording] = self.intan_recordings[recording].remove_channels(["B-000","B-001"])   
+                self.sc_data[recording] = self.intan_recordings_stream0[recording].remove_channels(["B-000","B-001"])   
             except:
                 self.sc_data[recording] = None  
                 print(f'Error recording SC data for {recording}')
     def get_nerve_cuff_data(self):
-        for recording in self.intan_recordings:
+        for recording in self.intan_recordings_stream0:
             try:
-                self.nerve_cuff_data[recording] = self.intan_recordings[recording].select_channels(["B-000"])
+                self.nerve_cuff_data[recording] = self.intan_recordings_stream0[recording].select_channels(["B-000"])
             except:
                 self.nerve_cuff_data[recording] = None
                 print(f'Error recording nerve cuff data for {recording}')
                 pass
 
     def get_emg_data(self):
-        for recording in self.intan_recordings:
+        for recording in self.intan_recordings_stream0:
             try:
-                self.emg_data[recording] = self.intan_recordings[recording].select_channels(["B-001"])
+                self.emg_data[recording] = self.intan_recordings_stream0[recording].select_channels(["B-001"])
             except:
                 self.emg_data[recording] = None
                 print(f'Error recording emg data for {recording}')
@@ -211,74 +239,84 @@ class kilosort_wrapper:
                         # save_preprocessed_copy=True
                         )
                 
-                # outputs saved to results_dir
-                results_dir = Path(os.path.join(self.SAVE_DIRECTORY, 'binary',os.path.basename(folder), 'kilosort4')) # Path(settings['data_dir']).joinpath('kilosort4')
-                ops = np.load(results_dir / 'ops.npy', allow_pickle=True).item()
-                camps = pd.read_csv(results_dir / 'cluster_Amplitude.tsv', sep='\t')['Amplitude'].values
-                contam_pct = pd.read_csv(results_dir / 'cluster_ContamPct.tsv', sep='\t')['ContamPct'].values
-                chan_map =  np.load(results_dir / 'channel_map.npy')
-                templates =  np.load(results_dir / 'templates.npy')
-                chan_best = (templates**2).sum(axis=1).argmax(axis=-1)
-                chan_best = chan_map[chan_best]
-                amplitudes = np.load(results_dir / 'amplitudes.npy')
-                st = np.load(results_dir / 'spike_times.npy')
-                clu = np.load(results_dir / 'spike_clusters.npy')
-                firing_rates = np.unique(clu, return_counts=True)[1] * 30000 / st.max()
-                dshift = ops['dshift']
+                try: # save the kilosort outputs
+                    # outputs saved to results_dir
+                    results_dir = Path(os.path.join(self.SAVE_DIRECTORY, 'binary',os.path.basename(folder), 'kilosort4')) # Path(settings['data_dir']).joinpath('kilosort4')
+                    ops = np.load(results_dir / 'ops.npy', allow_pickle=True).item()
+                    camps = pd.read_csv(results_dir / 'cluster_Amplitude.tsv', sep='\t')['Amplitude'].values
+                    contam_pct = pd.read_csv(results_dir / 'cluster_ContamPct.tsv', sep='\t')['ContamPct'].values
+                    chan_map =  np.load(results_dir / 'channel_map.npy')
+                    templates =  np.load(results_dir / 'templates.npy')
+                    chan_best = (templates**2).sum(axis=1).argmax(axis=-1)
+                    chan_best = chan_map[chan_best]
+                    amplitudes = np.load(results_dir / 'amplitudes.npy')
+                    st = np.load(results_dir / 'spike_times.npy')
+                    clu = np.load(results_dir / 'spike_clusters.npy')
+                    firing_rates = np.unique(clu, return_counts=True)[1] * 30000 / st.max()
+                    dshift = ops['dshift']
+                except:
+                    print(f'Error saving kilosort outputs for {folder}')
+                    pass
 
-                rcParams['axes.spines.top'] = False
-                rcParams['axes.spines.right'] = False
-                gray = .5 * np.ones(3)
+                try: # plotting the kilosort outputs
+                    rcParams['axes.spines.top'] = False
+                    rcParams['axes.spines.right'] = False
+                    gray = .5 * np.ones(3)
 
-                fig = plt.figure(figsize=(10,10), dpi=100)
-                fig.suptitle(os.path.basename(folder))
-                grid = gridspec.GridSpec(3, 3, figure=fig, hspace=0.5, wspace=0.5)
+                    fig = plt.figure(figsize=(10,10), dpi=100)
+                    fig.suptitle(os.path.basename(folder))
+                    grid = gridspec.GridSpec(3, 3, figure=fig, hspace=0.5, wspace=0.5)
 
-                ax = fig.add_subplot(grid[0,0])
-                ax.plot(np.arange(0, ops['Nbatches'])*2, dshift);
-                ax.set_xlabel('time (sec.)')
-                ax.set_ylabel('drift (um)')
+                    ax = fig.add_subplot(grid[0,0])
+                    ax.plot(np.arange(0, ops['Nbatches'])*2, dshift);
+                    ax.set_xlabel('time (sec.)')
+                    ax.set_ylabel('drift (um)')
 
-                ax = fig.add_subplot(grid[0,1:])
-                t0 = 0
-                t1 = np.nonzero(st > ops['fs']*5)[0][0]
-                ax.scatter(st[t0:t1]/30000., chan_best[clu[t0:t1]], s=0.5, color='k', alpha=0.25)
-                ax.set_xlim([0, 5])
-                ax.set_ylim([chan_map.max(), 0])
-                ax.set_xlabel('time (sec.)')
-                ax.set_ylabel('channel')
-                ax.set_title('spikes from units')
+                    ax = fig.add_subplot(grid[0,1:])
+                    t0 = 0
+                    t1 = np.nonzero(st > ops['fs']*5)[0][0]
+                    ax.scatter(st[t0:t1]/30000., chan_best[clu[t0:t1]], s=0.5, color='k', alpha=0.25)
+                    ax.set_xlim([0, 5])
+                    ax.set_ylim([chan_map.max(), 0])
+                    ax.set_xlabel('time (sec.)')
+                    ax.set_ylabel('channel')
+                    ax.set_title('spikes from units')
 
-                ax = fig.add_subplot(grid[1,0])
-                nb=ax.hist(firing_rates, 20, color=gray)
-                ax.set_xlabel('firing rate (Hz)')
-                ax.set_ylabel('# of units')
-
-                ax = fig.add_subplot(grid[1,1])
-                nb=ax.hist(camps, 20, color=gray)
-                ax.set_xlabel('amplitude')
-                ax.set_ylabel('# of units')
-
-                ax = fig.add_subplot(grid[1,2])
-                nb=ax.hist(np.minimum(100, contam_pct), np.arange(0,105,5), color=gray)
-                ax.plot([10, 10], [0, nb[0].max()], 'k--')
-                ax.set_xlabel('% contamination')
-                ax.set_ylabel('# of units')
-                ax.set_title('< 10% = good units')
-
-                for k in range(2):
-                    ax = fig.add_subplot(grid[2,k])
-                    is_ref = contam_pct<10.
-                    ax.scatter(firing_rates[~is_ref], camps[~is_ref], s=3, color='r', label='mua', alpha=0.25)
-                    ax.scatter(firing_rates[is_ref], camps[is_ref], s=3, color='b', label='good', alpha=0.25)
-                    ax.set_ylabel('amplitude (a.u.)')
+                    ax = fig.add_subplot(grid[1,0])
+                    nb=ax.hist(firing_rates, 20, color=gray)
                     ax.set_xlabel('firing rate (Hz)')
-                    ax.legend()
-                    if k==1:
-                        ax.set_xscale('log')
-                        ax.set_yscale('log')
-                        ax.set_title('loglog')
+                    ax.set_ylabel('# of units')
+
+                    ax = fig.add_subplot(grid[1,1])
+                    nb=ax.hist(camps, 20, color=gray)
+                    ax.set_xlabel('amplitude')
+                    ax.set_ylabel('# of units')
+
+                    ax = fig.add_subplot(grid[1,2])
+                    nb=ax.hist(np.minimum(100, contam_pct), np.arange(0,105,5), color=gray)
+                    ax.plot([10, 10], [0, nb[0].max()], 'k--')
+                    ax.set_xlabel('% contamination')
+                    ax.set_ylabel('# of units')
+                    ax.set_title('< 10% = good units')
+
+                    for k in range(2):
+                        ax = fig.add_subplot(grid[2,k])
+                        is_ref = contam_pct<10.
+                        ax.scatter(firing_rates[~is_ref], camps[~is_ref], s=3, color='r', label='mua', alpha=0.25)
+                        ax.scatter(firing_rates[is_ref], camps[is_ref], s=3, color='b', label='good', alpha=0.25)
+                        ax.set_ylabel('amplitude (a.u.)')
+                        ax.set_xlabel('firing rate (Hz)')
+                        ax.legend()
+                        if k==1:
+                            ax.set_xscale('log')
+                            ax.set_yscale('log')
+                            ax.set_title('loglog')
+                    plt.savefig(os.path.join(self.SAVE_DIRECTORY, 'figures', f'review_plots_{self.RAT_ID}_{os.path.basename(folder)}.png'), dpi=150)
                     plt.show()
+
+                except ValueError as e:
+                    print(f'Error plotting kilosort outputs for {folder}')
+                    raise e
 
                 try:
                     probe = ops['probe']
@@ -292,12 +330,13 @@ class kilosort_wrapper:
                     gstr = ['good', 'mua']
                     for j in range(2):
                         try:
-                            print(f'~~~~~~~~~~~~~~ {gstr[j]} units ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~')
-                            print('title = number of spikes from each unit')
-                            print(os.path.basename(folder))
+                            # print(f'~~~~~~~~~~~~~~ {gstr[j]} units ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~')
+                            # print('title = number of spikes from each unit')
+                            # print(os.path.basename(folder))
                             units = good_units if j==0 else mua_units 
                             fig = plt.figure(figsize=(12,3), dpi=150)
                             grid = gridspec.GridSpec(2,20, figure=fig, hspace=0.25, wspace=0.5)
+                            fig.suptitle(f"trial: {os.path.basename(folder)}: {gstr[j]} units | title = number of spikes from each unit ")
 
                             for k in range(40):
                                 wi = units[np.random.randint(len(units))]
@@ -320,12 +359,28 @@ class kilosort_wrapper:
 
                                 ax.set_title(f'{nsp}', fontsize='small')
                                 ax.axis('off')
+                            plt.savefig(os.path.join(self.SAVE_DIRECTORY, 'figures', f'spikes_{gstr[j]}_{self.RAT_ID}_{os.path.basename(folder)}.png'), dpi=150)
                             plt.show()
                         except:
                             print(f'ERROR: could not plot units for {os.path.basename(folder)}, {gstr[j]}. skipping plot...')
-                except:
+                except ValueError as e:
                     print(f'ERROR: could not plot {os.path.basename(folder)}')
+                    raise e
 
-            except:
-                print(f'ERROR: could not analyze {os.path.basename(folder)}')
+            except ValueError as e:
+                error_message = str(e)
+                print(f"\nerror processing data in folder: {os.path.basename(folder)}")
+
+                # Custom handling for specific errors
+                if "Unrecognized extension for probe" in error_message:
+
+                    print("- check your probe file directory - is it a prb json?")
+                    # Optionally re-raise the exception if necessary
+                    pass
+                else:
+                    print("\nAn unexpected error occurred:")
+                    print(error_message)
+                    # raise e
+                    pass
+
                 
