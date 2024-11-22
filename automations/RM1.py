@@ -11,7 +11,7 @@ from matplotlib import gridspec, rcParams
 
 class Rat:
     
-    def __init__(self, DATA_DIRECTORY, PROBE_DIRECTORY, RAT_ID):
+    def __init__(self, DATA_DIRECTORY, PROBE_DIRECTORY, RAT_ID, **kwargs):
         
         self.RAT_ID = RAT_ID
         self.PROBE_DIRECTORY = PROBE_DIRECTORY
