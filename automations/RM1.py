@@ -175,6 +175,7 @@ class kilosort_wrapper:
         self.PROBE_DIRECTORY = rat_class_instance.PROBE_DIRECTORY
         self.DATA_DIRECTORY = rat_class_instance.DATA_DIRECTORY
         self.SAVE_DIRECTORY = SAVE_DIRECTORY
+        self.kilosort_results = {}  # Initialize the dictionary to store results
         print(f"running kilosort wrapper for rat {self.RAT_ID}")
 
     def save_spinalcord_data_to_binary(self, TRIAL_NAMES = None):
@@ -206,7 +207,7 @@ class kilosort_wrapper:
             except:
                 print(f'ERROR: issue importing data for {recording}')
 
-    def run_spinalcord_kilosort(self, new_settings = None, **kwargs): # runs kilosort in a loop through all of the binary files saved to the SAVE_DIRECTORY/binary folder
+    def run_kilosort_trial_summary(self, new_settings = None, **kwargs): # runs kilosort in a loop through all of the binary files saved to the SAVE_DIRECTORY/binary folder
 
         # Get a list of all folders that contain `.bin` files
         folders_with_bin = []
@@ -272,15 +273,26 @@ class kilosort_wrapper:
                     ax.set_xlabel('time (sec.)')
                     ax.set_ylabel('drift (um)')
 
+                    # Define the specific time window in seconds
+                    time_window_start = 10  # Start time in seconds
+                    time_window_end = 20    # End time in seconds
+
+                    # Convert the time window to indices
+                    t_start_index = np.searchsorted(st, time_window_start * 30000)  # Convert to sample index
+                    t_end_index = np.searchsorted(st, time_window_end * 30000)
+
+                    # Plot the spikes within the specific time window
                     ax = fig.add_subplot(grid[0,1:])
-                    t0 = 0
-                    t1 = np.nonzero(st > ops['fs']*5)[0][0]
-                    ax.scatter(st[t0:t1]/30000., chan_best[clu[t0:t1]], s=0.5, color='k', alpha=0.25)
-                    ax.set_xlim([0, 5])
+                    ax.scatter(st[t_start_index:t_end_index]/30000., 
+                            chan_best[clu[t_start_index:t_end_index]], 
+                            s=0.5, color='k', alpha=0.25)
+
+                    # Set x-axis limits to the specified time window
+                    ax.set_xlim([time_window_start, time_window_end])
                     ax.set_ylim([chan_map.max(), 0])
                     ax.set_xlabel('time (sec.)')
                     ax.set_ylabel('channel')
-                    ax.set_title('spikes from units')
+                    ax.set_title(f'spikes from units ({time_window_start}-{time_window_end} sec)')
 
                     ax = fig.add_subplot(grid[1,0])
                     nb=ax.hist(firing_rates, 20, color=gray)
@@ -383,4 +395,37 @@ class kilosort_wrapper:
                     # raise e
                     pass
 
-                
+
+    def extract_kilosort_outputs(self):
+        """
+        Load Kilosort output files into a nested dictionary.
+
+        The structure will be:
+        self.kilosort_results[trial_name][file_name] = data
+        """
+        binary_folder = self.SAVE_DIRECTORY
+        # Walk through the binary folder
+        for root, dirs, files in os.walk(binary_folder):
+            if 'kilosort4' in dirs:
+                trial_name = os.path.basename(root)
+                kilosort_dir = os.path.join(root, 'kilosort4')
+                self.kilosort_results[trial_name] = {}
+                # List the files in kilosort_dir
+                for file_name in os.listdir(kilosort_dir):
+                    file_path = os.path.join(kilosort_dir, file_name)
+                    if file_name.endswith('.npy'):
+                        # Load the numpy array
+                        data = np.load(file_path, allow_pickle=True).item() if file_name == 'ops.npy' else np.load(file_path)
+                        self.kilosort_results[trial_name][file_name] = data
+                    elif file_name.endswith('.tsv'):
+                        # Load the TSV file into a pandas DataFrame
+                        data = pd.read_csv(file_path, sep='\t')
+                        self.kilosort_results[trial_name][file_name] = data
+                    elif file_name.endswith('.log') or file_name.endswith('.py'):
+                        # Load log or parameter files as strings
+                        with open(file_path, 'r') as file:
+                            data = file.read()
+                        self.kilosort_results[trial_name][file_name] = data
+                    else:
+                        # Handle other file types if necessary
+                        pass
