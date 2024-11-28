@@ -9,8 +9,21 @@ from kilosort import run_kilosort, DEFAULT_SETTINGS
 import matplotlib.pyplot as plt
 from matplotlib import gridspec, rcParams
 
-class Rat:
+class Rat: # for this class, you pass the folder containing the rat metadata in excel and matlab files, as well as the intan data in rhd format
+    """
+    The `Rat` class is designed to process and store data from experiments involving rats. It takes in three parameters: `DATA_DIRECTORY`, `PROBE_DIRECTORY`, and `RAT_ID`.
+    Here is a list explaining what each class method does:
+    * `__init__`: Initializes the `Rat` object by setting its attributes and importing metadata, MATLAB files, and Intan data.
+    * `import_metadata`: Imports metadata from an Excel file and stores it in the object's attributes.
+    * `import_matlab_files`: Imports MATLAB files from a directory and stores them in a dictionary.
+    * `import_intan_data`: Imports Intan data from RHD files and stores it in a dictionary.
+    * `get_sc_data`: Extracts spinal cord data from the Intan recordings and stores it in a dictionary.
+    * `get_nerve_cuff_data`: Extracts nerve cuff data from the Intan recordings and stores it in a dictionary.
+    * `get_emg_data`: Extracts EMG data from the Intan recordings and stores it in a dictionary.
+
+    Note that the `Rat` class assumes a specific directory structure and file naming convention, which is not explicitly documented in the code.
     
+    """
     def __init__(self, DATA_DIRECTORY, PROBE_DIRECTORY, RAT_ID, **kwargs):
         
         self.RAT_ID = RAT_ID
@@ -92,7 +105,6 @@ class Rat:
                 # Use the filename (without extension) as the key in the dictionary
                 self.mat_files_dict[filename[:-4]] = mat_data
 
-
     # Import all intan data from rhd file and store in a dictionary
     def import_intan_data(self):
         data_path = os.path.join(self.DATA_DIRECTORY, self.RAT_ID,self.RAT_ID)
@@ -168,7 +180,7 @@ class Rat:
                 print(f'Error recording emg data for {recording}')
                 pass
 
-class SpikeInterface_wrapper: # for this class, you will pass the class instance of a rat object as an argument
+class SpikeInterface_wrapper: # for this class, you will pass an instance of a rat class as an argument
     def __init__(self, rat_class_instance, SAVE_DIRECTORY): # for this class, you will pass the class instance of a rat object as an argument
         self.RAT_ID = rat_class_instance.RAT_ID
         self.data = rat_class_instance
@@ -208,7 +220,7 @@ class SpikeInterface_wrapper: # for this class, you will pass the class instance
             except:
                 print(f'ERROR: issue importing data for {recording}')
 
-class Kilosort_wrapper:
+class Kilosort_wrapper: # for this class, you will pass the directory containing the binary files and kilosort results (if available)
 
     def __init__(self, SAVE_DIRECTORY,PROBE_DIRECTORY): # for this class, you will pass the class instance of a rat object as an argument
         self.PROBE_DIRECTORY = PROBE_DIRECTORY
