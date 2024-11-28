@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 
 # Custom imports
 from automations import RM1
-from automations import kilosort_wrapper
+from automations import Kilosort_wrapper
 
 PROBE_DIRECTORY = Path(r'D:\Data\CMU.80 Data\88 Analyzed Data\88.001 A1x32-Edge-5mm-20-177-A32\A1x32-Edge-5mm-20-177-A32.prb')
 

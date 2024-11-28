@@ -168,7 +168,7 @@ class Rat:
                 print(f'Error recording emg data for {recording}')
                 pass
 
-class kilosort_wrapper:
+class SpikeInterface_wrapper: # for this class, you will pass the class instance of a rat object as an argument
     def __init__(self, rat_class_instance, SAVE_DIRECTORY): # for this class, you will pass the class instance of a rat object as an argument
         self.RAT_ID = rat_class_instance.RAT_ID
         self.data = rat_class_instance
@@ -176,7 +176,7 @@ class kilosort_wrapper:
         self.DATA_DIRECTORY = rat_class_instance.DATA_DIRECTORY
         self.SAVE_DIRECTORY = SAVE_DIRECTORY
         self.kilosort_results = {}  # Initialize the dictionary to store results
-        print(f"running kilosort wrapper for rat {self.RAT_ID}")
+        print(f"Preparing SpikeInterface wrapper for rat {self.RAT_ID}")
 
     def save_spinalcord_data_to_binary(self, TRIAL_NAMES = None):
         # NOTE: Data will be saved as np.int16 by default since that is the standard
@@ -204,8 +204,18 @@ class kilosort_wrapper:
                         self.data.sc_data[recording], os.path.join(self.SAVE_DIRECTORY, 'binary',f"{recording}"), data_name=f'{self.RAT_ID}_{recording}_data.bin', dtype=dtype,
                         chunksize=60000, export_probe=False, probe_name= self.PROBE_DIRECTORY # export the probe file is false because there is no probe file to begin with
                         )
+                    print(f'Data saved to {filename}')
             except:
                 print(f'ERROR: issue importing data for {recording}')
+
+class Kilosort_wrapper:
+
+    def __init__(self, SAVE_DIRECTORY,PROBE_DIRECTORY): # for this class, you will pass the class instance of a rat object as an argument
+        self.PROBE_DIRECTORY = PROBE_DIRECTORY
+        self.SAVE_DIRECTORY = SAVE_DIRECTORY
+        self.kilosort_results = {}  # Initialize the dictionary to store results
+        print(f"Preparing Kilosort wrapper...")
+
 
     def run_kilosort_trial_summary(self, new_settings = None, **kwargs): # runs kilosort in a loop through all of the binary files saved to the SAVE_DIRECTORY/binary folder
 
@@ -255,8 +265,8 @@ class kilosort_wrapper:
                     clu = np.load(results_dir / 'spike_clusters.npy')
                     firing_rates = np.unique(clu, return_counts=True)[1] * 30000 / st.max()
                     dshift = ops['dshift']
-                except:
-                    print(f'Error saving kilosort outputs for {folder}')
+                except Exception as e:
+                    print(f'Error saving kilosort outputs for {folder}: {e}')
                     pass
 
                 try: # plotting the kilosort outputs
@@ -269,7 +279,7 @@ class kilosort_wrapper:
                     grid = gridspec.GridSpec(3, 3, figure=fig, hspace=0.5, wspace=0.5)
 
                     ax = fig.add_subplot(grid[0,0])
-                    ax.plot(np.arange(0, ops['Nbatches'])*2, dshift);
+                    ax.plot(np.arange(0, ops['Nbatches'])*2, dshift)
                     ax.set_xlabel('time (sec.)')
                     ax.set_ylabel('drift (um)')
 
@@ -323,7 +333,7 @@ class kilosort_wrapper:
                             ax.set_xscale('log')
                             ax.set_yscale('log')
                             ax.set_title('loglog')
-                    plt.savefig(os.path.join(self.SAVE_DIRECTORY, 'figures', f'review_plots_{self.RAT_ID}_{os.path.basename(folder)}.png'), dpi=150)
+                    plt.savefig(os.path.join(self.SAVE_DIRECTORY, 'figures', f'spike_summary_{os.path.basename(folder)}.png'), dpi=150)
                     plt.show()
 
                 except ValueError as e:
@@ -395,15 +405,15 @@ class kilosort_wrapper:
                     # raise e
                     pass
 
-
     def extract_kilosort_outputs(self):
         """
-        Load Kilosort output files into a nested dictionary.
+        Load Kilosort output files into a nested disctionary.
 
         The structure will be:
         self.kilosort_results[trial_name][file_name] = data
         """
-        binary_folder = self.SAVE_DIRECTORY
+        # Update binary_folder to include the 'binary' subdirectory
+        binary_folder = os.path.join(self.SAVE_DIRECTORY, 'binary')
         # Walk through the binary folder
         for root, dirs, files in os.walk(binary_folder):
             if 'kilosort4' in dirs:
@@ -415,7 +425,10 @@ class kilosort_wrapper:
                     file_path = os.path.join(kilosort_dir, file_name)
                     if file_name.endswith('.npy'):
                         # Load the numpy array
-                        data = np.load(file_path, allow_pickle=True).item() if file_name == 'ops.npy' else np.load(file_path)
+                        if file_name == 'ops.npy':
+                            data = np.load(file_path, allow_pickle=True).item()
+                        else:
+                            data = np.load(file_path)
                         self.kilosort_results[trial_name][file_name] = data
                     elif file_name.endswith('.tsv'):
                         # Load the TSV file into a pandas DataFrame
@@ -429,3 +442,58 @@ class kilosort_wrapper:
                     else:
                         # Handle other file types if necessary
                         pass
+    
+    def raster_plots(self):
+                    
+            try: # save the kilosort outputs
+                # outputs saved to results_dir
+                results_dir = Path(os.path.join(self.SAVE_DIRECTORY, 'binary',os.path.basename(folder), 'kilosort4')) # Path(settings['data_dir']).joinpath('kilosort4')
+                ops = np.load(results_dir / 'ops.npy', allow_pickle=True).item()
+                camps = pd.read_csv(results_dir / 'cluster_Amplitude.tsv', sep='\t')['Amplitude'].values
+                contam_pct = pd.read_csv(results_dir / 'cluster_ContamPct.tsv', sep='\t')['ContamPct'].values
+                chan_map =  np.load(results_dir / 'channel_map.npy')
+                templates =  np.load(results_dir / 'templates.npy')
+                chan_best = (templates**2).sum(axis=1).argmax(axis=-1)
+                chan_best = chan_map[chan_best]
+                amplitudes = np.load(results_dir / 'amplitudes.npy')
+                st = np.load(results_dir / 'spike_times.npy')
+                clu = np.load(results_dir / 'spike_clusters.npy')
+                firing_rates = np.unique(clu, return_counts=True)[1] * 30000 / st.max()
+                dshift = ops['dshift']
+            except Exception as e:
+                print(f'Error saving kilosort outputs for {folder}: {e}')
+                pass
+
+            try: # plotting the kilosort outputs
+                rcParams['axes.spines.top'] = False
+                rcParams['axes.spines.right'] = False
+                gray = .5 * np.ones(3)
+
+                fig = plt.figure(figsize=(10,10), dpi=100)
+                fig.suptitle(os.path.basename(folder))
+                grid = gridspec.GridSpec(3, 3, figure=fig, hspace=0.5, wspace=0.5)
+
+                # Define the specific time window in seconds
+                time_window_start = 10  # Start time in seconds
+                time_window_end = 20    # End time in seconds
+
+                # Convert the time window to indices
+                t_start_index = np.searchsorted(st, time_window_start * 30000)  # Convert to sample index
+                t_end_index = np.searchsorted(st, time_window_end * 30000)
+
+                # Plot the spikes within the specific time window
+                ax = fig.add_subplot(grid[0,1:])
+                ax.scatter(st[t_start_index:t_end_index]/30000., 
+                        chan_best[clu[t_start_index:t_end_index]], 
+                        s=0.5, color='k', alpha=0.25)
+
+                # Set x-axis limits to the specified time window
+                ax.set_xlim([time_window_start, time_window_end])
+                ax.set_ylim([chan_map.max(), 0])
+                ax.set_xlabel('time (sec.)')
+                ax.set_ylabel('channel')
+                ax.set_title(f'spikes from units ({time_window_start}-{time_window_end} sec)')
+
+            except Exception as e:
+                print(f'Error plotting kilosort outputs for {folder}: {e}')
+                pass
