@@ -419,38 +419,55 @@ class Kilosort_wrapper: # for this class, you will pass the directory containing
 
     def extract_kilosort_outputs(self):
         """
-        Load Kilosort output files into a nested disctionary.
-
-        The structure will be:
-        self.kilosort_results[trial_name][file_name] = data
+        Load specific Kilosort output files into self.kilosort_results.
         """
-        # Update binary_folder to include the 'binary' subdirectory
-        binary_folder = os.path.join(self.SAVE_DIRECTORY, 'binary')
-        # Walk through the binary folder
-        for root, dirs, files in os.walk(binary_folder):
-            if 'kilosort4' in dirs:
-                trial_name = os.path.basename(root)
-                kilosort_dir = os.path.join(root, 'kilosort4')
-                self.kilosort_results[trial_name] = {}
-                # List the files in kilosort_dir
-                for file_name in os.listdir(kilosort_dir):
-                    file_path = os.path.join(kilosort_dir, file_name)
-                    if file_name.endswith('.npy'):
-                        # Load the numpy array
-                        if file_name == 'ops.npy':
-                            data = np.load(file_path, allow_pickle=True).item()
-                        else:
-                            data = np.load(file_path)
-                        self.kilosort_results[trial_name][file_name] = data
-                    elif file_name.endswith('.tsv'):
-                        # Load the TSV file into a pandas DataFrame
-                        data = pd.read_csv(file_path, sep='\t')
-                        self.kilosort_results[trial_name][file_name] = data
-                    elif file_name.endswith('.log') or file_name.endswith('.py'):
-                        # Load log or parameter files as strings
-                        with open(file_path, 'r') as file:
-                            data = file.read()
-                        self.kilosort_results[trial_name][file_name] = data
-                    else:
-                        # Handle other file types if necessary
-                        pass
+        try:
+            # Assuming that the results are saved in self.SAVE_DIRECTORY/binary/trial_folder/kilosort4
+            binary_dir = Path(self.SAVE_DIRECTORY) / 'binary'
+            trial_folders = [f for f in binary_dir.iterdir() if f.is_dir()]
+            
+            if trial_folders:
+                # Assuming there's only one trial folder
+                trial_folder = trial_folders[0]
+                trial_name = trial_folder.name
+                results_dir = trial_folder / 'kilosort4'
+            else:
+                # If no trial folders, default to 'kilosort4' in 'binary'
+                trial_name = 'default_trial'
+                results_dir = binary_dir / 'kilosort4'
+
+            # Initialize the results dictionary for the trial
+            self.kilosort_results[trial_name] = {}
+
+            # Load the Kilosort output files
+            ops = np.load(results_dir / 'ops.npy', allow_pickle=True).item()
+            camps = pd.read_csv(results_dir / 'cluster_Amplitude.tsv', sep='\t')['Amplitude'].values
+            contam_pct = pd.read_csv(results_dir / 'cluster_ContamPct.tsv', sep='\t')['ContamPct'].values
+            chan_map = np.load(results_dir / 'channel_map.npy')
+            templates = np.load(results_dir / 'templates.npy')
+            chan_best = (templates**2).sum(axis=1).argmax(axis=-1)
+            chan_best = chan_map[chan_best]
+            amplitudes = np.load(results_dir / 'amplitudes.npy')
+            st = np.load(results_dir / 'spike_times.npy')
+            clu = np.load(results_dir / 'spike_clusters.npy')
+            firing_rates = np.unique(clu, return_counts=True)[1] * 30000 / st.max()
+            dshift = ops['dshift']
+
+            # Store the loaded data into the results dictionary
+            self.kilosort_results[trial_name] = {
+                'ops': ops,
+                'cluster_amplitudes': camps,
+                'contamination_percentage': contam_pct,
+                'channel_mapping': chan_map,
+                'templates': templates,
+                'chan_best': chan_best,
+                'amplitudes': amplitudes,
+                'spike_times': st,
+                'spike_clusters': clu,
+                'firing_rates': firing_rates,
+                'dshift': dshift
+            }
+
+        except Exception as e:
+            print(f'Error loading Kilosort outputs for {trial_name}: {e}')
+            pass
