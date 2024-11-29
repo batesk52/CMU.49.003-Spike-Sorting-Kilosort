@@ -100,11 +100,11 @@ def static_trace(recording, channel_id='A-000',start_time=0, end_time=10):
     print(f"gain_to_uV: {gain_to_uV}, offset_to_uV: {offset_to_uV}")
 
     # Retrieve the trace for the specified channel
-    trace = recording.get_traces(channel_ids=[channel_id])
+    trace = recording.get_traces(channel_ids=[channel_id], return_scaled=True)
 
-    # Convert raw data to voltage
-    voltage = trace * gain_to_uV + offset_to_uV
-
+    # # Convert raw data to voltage
+    # voltage = trace * gain_to_uV + offset_to_uV
+    voltage = trace # going to try the return_scaled = True
     # Get sampling frequency and calculate time axis
     sampling_rate = recording.get_sampling_frequency()
     n_samples = len(voltage)
