@@ -1,12 +1,10 @@
-
-
 # plots.py
 
 import numpy as np
 import plotly.graph_objects as go
 import matplotlib.pyplot as plt
 
-def interactive_trace(recording, channel_id='A-000', downsample_factor=10):
+def interactive_trace(recording, channel_id='A-000', downsample_factor=10, title=None):
     """
     Plots the voltage trace using Plotly.
 
@@ -14,6 +12,7 @@ def interactive_trace(recording, channel_id='A-000', downsample_factor=10):
     - recording: the recording object from which to extract data
     - channel_id: string, the ID of the channel to plot
     - downsample_factor: int, factor by which to downsample the data
+    - title: string, optional custom title for the plot
     """
     # Get channel IDs and find the index of the specified channel
     channel_ids = recording.get_channel_ids()
@@ -63,9 +62,15 @@ def interactive_trace(recording, channel_id='A-000', downsample_factor=10):
         line=dict(color='blue')
     ))
 
+    # Determine the title
+    if title is None:
+        plot_title = f'Voltage vs Time for Channel {channel_id}'
+    else:
+        plot_title = title
+
     # Set plot layout
     fig.update_layout(
-        title=f'Voltage vs Time for Channel {channel_id}',
+        title=plot_title,
         xaxis_title='Time (s)',
         yaxis_title='Voltage (µV)',
         showlegend=True,
@@ -77,13 +82,16 @@ def interactive_trace(recording, channel_id='A-000', downsample_factor=10):
     fig.show()
 
 
-def static_trace(recording, channel_id='A-000',start_time=0, end_time=10):
+def static_trace(recording, channel_id='A-000', start_time=0, end_time=10, title=None):
     """
-    Plots the voltage trace using Plotly.
+    Plots the voltage trace using Matplotlib.
 
     Parameters:
     - recording: the recording object from which to extract data
     - channel_id: string, the ID of the channel to plot
+    - start_time: float, start time in seconds for the plot
+    - end_time: float, end time in seconds for the plot
+    - title: string, optional custom title for the plot
     """
     # Get channel IDs and find the index of the specified channel
     channel_ids = recording.get_channel_ids()
@@ -102,9 +110,9 @@ def static_trace(recording, channel_id='A-000',start_time=0, end_time=10):
     # Retrieve the trace for the specified channel
     trace = recording.get_traces(channel_ids=[channel_id], return_scaled=True)
 
-    # # Convert raw data to voltage
-    # voltage = trace * gain_to_uV + offset_to_uV
-    voltage = trace # going to try the return_scaled = True
+    # Convert raw data to voltage (if needed)
+    voltage = trace  # Assuming return_scaled=True already gives voltage
+
     # Get sampling frequency and calculate time axis
     sampling_rate = recording.get_sampling_frequency()
     n_samples = len(voltage)
@@ -114,7 +122,7 @@ def static_trace(recording, channel_id='A-000',start_time=0, end_time=10):
     time = time.flatten()
     voltage = voltage.flatten()  
 
-    # plotting a time window
+    # Plotting a time window
     start_idx = int(start_time * sampling_rate)
     end_idx = int(end_time * sampling_rate)
 
@@ -122,10 +130,17 @@ def static_trace(recording, channel_id='A-000',start_time=0, end_time=10):
     voltage_window = voltage[start_idx:end_idx]
 
     plt.figure(figsize=(15, 5))
-    plt.plot(time_window, voltage_window, label='Channel A-000')
+    plt.plot(time_window, voltage_window, label=f'Channel {channel_id}')
     plt.xlabel('Time (s)')
     plt.ylabel('Voltage (µV)')
-    plt.title(f'Voltage Trace for Channel A-000 ({start_time}-{end_time} seconds)')
+    
+    # Determine the title
+    if title is None:
+        plot_title = f'Voltage Trace for Channel {channel_id} ({start_time}-{end_time} seconds)'
+    else:
+        plot_title = title
+    
+    plt.title(plot_title)
     plt.legend()
     plt.tight_layout()
     plt.show()

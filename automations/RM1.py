@@ -228,6 +228,14 @@ class Kilosort_wrapper: # for this class, you will pass the directory containing
         self.kilosort_results = {}  # Initialize the dictionary to store results
         print(f"Preparing Kilosort wrapper...")
 
+    def run_or_load_kilosort(self, trial_name, run_kilosort=False):
+        if run_kilosort:
+            # Code to run Kilosort
+            self.run_kilosort_trial_summary()
+        else:
+            # Load existing Kilosort outputs
+            self.extract_kilosort_outputs(trial_name)
+
 
     def run_kilosort_trial_summary(self, new_settings = None, **kwargs): # runs kilosort in a loop through all of the binary files saved to the SAVE_DIRECTORY/binary folder
 
@@ -419,55 +427,63 @@ class Kilosort_wrapper: # for this class, you will pass the directory containing
 
     def extract_kilosort_outputs(self):
         """
-        Load specific Kilosort output files into self.kilosort_results.
+        Load specific Kilosort output files from all trial folders into self.kilosort_results.
         """
         try:
             # Assuming that the results are saved in self.SAVE_DIRECTORY/binary/trial_folder/kilosort4
             binary_dir = Path(self.SAVE_DIRECTORY) / 'binary'
             trial_folders = [f for f in binary_dir.iterdir() if f.is_dir()]
             
-            if trial_folders:
-                # Assuming there's only one trial folder
-                trial_folder = trial_folders[0]
-                trial_name = trial_folder.name
-                results_dir = trial_folder / 'kilosort4'
-            else:
-                # If no trial folders, default to 'kilosort4' in 'binary'
-                trial_name = 'default_trial'
-                results_dir = binary_dir / 'kilosort4'
+            if not trial_folders:
+                print("No trial folders found.")
+                return
+            
+            # Initialize the main results dictionary if not already done
+            if not hasattr(self, 'kilosort_results'):
+                self.kilosort_results = {}
+            
+            for trial_folder in trial_folders:
+                try:
+                    trial_name = trial_folder.name
+                    results_dir = trial_folder / 'kilosort4'
+                    
+                    if not results_dir.exists():
+                        print(f"Kilosort directory not found for trial: {trial_name}")
+                        continue
 
-            # Initialize the results dictionary for the trial
-            self.kilosort_results[trial_name] = {}
+                    # Load the Kilosort output files
+                    ops = np.load(results_dir / 'ops.npy', allow_pickle=True).item()
+                    camps = pd.read_csv(results_dir / 'cluster_Amplitude.tsv', sep='\t')['Amplitude'].values
+                    contam_pct = pd.read_csv(results_dir / 'cluster_ContamPct.tsv', sep='\t')['ContamPct'].values
+                    chan_map = np.load(results_dir / 'channel_map.npy')
+                    templates = np.load(results_dir / 'templates.npy')
+                    chan_best = (templates**2).sum(axis=1).argmax(axis=-1)
+                    chan_best = chan_map[chan_best]
+                    amplitudes = np.load(results_dir / 'amplitudes.npy')
+                    st = np.load(results_dir / 'spike_times.npy')
+                    clu = np.load(results_dir / 'spike_clusters.npy')
+                    firing_rates = np.unique(clu, return_counts=True)[1] * 30000 / st.max()
+                    dshift = ops['dshift']
 
-            # Load the Kilosort output files
-            ops = np.load(results_dir / 'ops.npy', allow_pickle=True).item()
-            camps = pd.read_csv(results_dir / 'cluster_Amplitude.tsv', sep='\t')['Amplitude'].values
-            contam_pct = pd.read_csv(results_dir / 'cluster_ContamPct.tsv', sep='\t')['ContamPct'].values
-            chan_map = np.load(results_dir / 'channel_map.npy')
-            templates = np.load(results_dir / 'templates.npy')
-            chan_best = (templates**2).sum(axis=1).argmax(axis=-1)
-            chan_best = chan_map[chan_best]
-            amplitudes = np.load(results_dir / 'amplitudes.npy')
-            st = np.load(results_dir / 'spike_times.npy')
-            clu = np.load(results_dir / 'spike_clusters.npy')
-            firing_rates = np.unique(clu, return_counts=True)[1] * 30000 / st.max()
-            dshift = ops['dshift']
+                    # Store the loaded data into the results dictionary
+                    self.kilosort_results[trial_name] = {
+                        'ops': ops,
+                        'cluster_amplitudes': camps,
+                        'contamination_percentage': contam_pct,
+                        'channel_mapping': chan_map,
+                        'templates': templates,
+                        'chan_best': chan_best,
+                        'amplitudes': amplitudes,
+                        'spike_times': st,
+                        'spike_clusters': clu,
+                        'firing_rates': firing_rates,
+                        'dshift': dshift
+                    }
+                    print(f"Kilosort outputs successfully loaded for trial: {trial_name}")
 
-            # Store the loaded data into the results dictionary
-            self.kilosort_results[trial_name] = {
-                'ops': ops,
-                'cluster_amplitudes': camps,
-                'contamination_percentage': contam_pct,
-                'channel_mapping': chan_map,
-                'templates': templates,
-                'chan_best': chan_best,
-                'amplitudes': amplitudes,
-                'spike_times': st,
-                'spike_clusters': clu,
-                'firing_rates': firing_rates,
-                'dshift': dshift
-            }
+                except Exception as trial_error:
+                    print(f"Error loading Kilosort outputs for trial {trial_folder.name}: {trial_error}: has kilosort been run?")
+                    continue
 
         except Exception as e:
-            print(f'Error loading Kilosort outputs for {trial_name}: {e}')
-            pass
+            print(f"Error processing Kilosort outputs: {e}")
