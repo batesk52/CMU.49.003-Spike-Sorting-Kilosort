@@ -8,6 +8,7 @@ from kilosort import io
 from kilosort import run_kilosort, DEFAULT_SETTINGS
 import matplotlib.pyplot as plt
 from matplotlib import gridspec, rcParams
+from spikeinterface import concatenate_recordings
 
 class Rat: # for this class, you pass the folder containing the rat metadata in excel and matlab files, as well as the intan data in rhd format
     """
@@ -179,6 +180,70 @@ class Rat: # for this class, you pass the folder containing the rat metadata in 
                 self.emg_data[recording] = None
                 print(f'Error recording emg data for {recording}')
                 pass
+    def slice_and_concatenate_recording(self, base_recording, first_window=(0, 1050000), last_window=None):
+        """
+        Slices the base recording to keep only the specified first and last window frames,
+        concatenates them, and returns the combined recording.
+
+        Parameters:
+        - base_recording: The recording to slice (e.g., sc_data, emg_data, etc.).
+        - first_window: A tuple (start_frame, end_frame) for the first window.
+        - last_window: A tuple (start_frame, end_frame) for the last window.
+                      If None, the last window will be from (total_frames - 500000) to total_frames.
+
+        Returns:
+        - recording_combined: The concatenated recording of the two slices.
+        """
+
+        # Slice the first window
+        recording_first = base_recording.frame_slice(start_frame=first_window[0], end_frame=first_window[1])
+
+        # Determine the last window frames
+        total_frames = base_recording.get_num_frames()
+        if last_window is None:
+            # Default to the last 1,050,000 frames (approximately 35 seconds)
+            last_window = (total_frames - 1050000, total_frames)
+        else:
+            # Ensure the end_frame does not exceed total_frames
+            last_window = (last_window[0], min(last_window[1], total_frames))
+
+        # Slice the last window
+        recording_last = base_recording.frame_slice(start_frame=last_window[0], end_frame=last_window[1])
+
+        # Concatenate the two recordings
+        recording_combined = concatenate_recordings([recording_first, recording_last])
+
+        return recording_combined
+
+    def remove_drg_stim_window(self, first_window=(0, 1050000), last_window=None):
+        """
+        Processes all spinal cord data recordings by slicing and concatenating the specified windows.
+
+        Parameters:
+        - first_window: Tuple specifying the first window frames.
+        - last_window: Tuple specifying the last window frames.
+
+         the default is to preserve the first & last 1,050,000 frames (approximately 35 seconds) from the recording.
+        """
+        processed_sc_data = {}
+        for recording_name, recording in self.sc_data.items():
+            if recording is not None:
+                try:
+                    combined_recording = self.slice_and_concatenate_recording(
+                        base_recording=recording,
+                        first_window=first_window,
+                        last_window=last_window
+                    )
+                    processed_sc_data[recording_name] = combined_recording
+                except Exception as e:
+                    print(f"Error processing {recording_name}: {e}")
+                    processed_sc_data[recording_name] = None
+            else:
+                print(f"No recording found for {recording_name}")
+                processed_sc_data[recording_name] = None
+        # Optionally, update self.sc_data with the processed data
+        self.sc_data = processed_sc_data
+
 
 class SpikeInterface_wrapper: # for this class, you will pass an instance of a rat class as an argument
     def __init__(self, rat_class_instance, SAVE_DIRECTORY): # for this class, you will pass the class instance of a rat object as an argument
