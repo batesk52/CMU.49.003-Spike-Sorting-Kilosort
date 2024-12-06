@@ -39,6 +39,7 @@ class Rat: # for this class, you pass the folder containing the rat metadata in 
         self.intan_recordings_stream3 = {}
         self.intan_recordings_stream4 = {}
         self.emg_data,self.nerve_cuff_data,self.sc_data = {},{},{}
+        self.analog_data = {}
         self.st_experiment_notes = None
         self.qst_experiment_notes = None
         self.drgs_experiment_notes = None
@@ -183,6 +184,17 @@ class Rat: # for this class, you pass the folder containing the rat metadata in 
                 self.emg_data[recording] = None
                 print(f'Error recording emg data for {recording}')
                 pass
+
+    def get_analog_data(self):
+        for recording in self.intan_recordings_stream0:
+            try:
+                self.analog_data[recording] = self.intan_recordings_stream3[recording]
+            except:
+                self.analog_data[recording] = None
+                print(f'Error recording von frey data for {recording}')
+                pass
+    
+    
     def slice_and_concatenate_recording(self, base_recording, first_window=(0, 1050000), last_window=None):
         """
         Slices the base recording to keep only the specified first and last window frames,
@@ -192,7 +204,7 @@ class Rat: # for this class, you pass the folder containing the rat metadata in 
         - base_recording: The recording to slice (e.g., sc_data, emg_data, etc.).
         - first_window: A tuple (start_frame, end_frame) for the first window.
         - last_window: A tuple (start_frame, end_frame) for the last window.
-                      If None, the last window will be from (total_frames - 500000) to total_frames.
+                      If None, the last window will be from (total_frames - 1050000) to total_frames.
 
         Returns:
         - recording_combined: The concatenated recording of the two slices.
@@ -218,7 +230,7 @@ class Rat: # for this class, you pass the folder containing the rat metadata in 
 
         return recording_combined
 
-    def remove_drg_stim_window(self, first_window=(0, 1050000), last_window=None):
+    def remove_drg_stim_window_sc(self, first_window=(0, 1050000), last_window=None):
         """
         Processes all spinal cord data recordings by slicing and concatenating the specified windows.
 
@@ -247,6 +259,35 @@ class Rat: # for this class, you pass the folder containing the rat metadata in 
         # Optionally, update self.sc_data with the processed data
         self.sc_data = processed_sc_data
 
+    def remove_drg_stim_window_analog(self, first_window=(0, 1050000), last_window=None):
+        """
+        Processes all analog recordings by slicing and concatenating the specified windows.
+
+        Parameters:
+        - first_window: Tuple specifying the first window frames.
+        - last_window: Tuple specifying the last window frames.
+
+         the default is to preserve the first & last 1,050,000 frames (approximately 35 seconds) from the recording.
+        """
+        processed_analog_data = {}
+        for recording_name, recording in self.analog_data.items():
+            if recording is not None:
+                try:
+                    combined_recording = self.slice_and_concatenate_recording(
+                        base_recording=recording,
+                        first_window=first_window,
+                        last_window=last_window
+                    )
+                    processed_analog_data[recording_name] = combined_recording
+                except Exception as e:
+                    print(f"Error processing {recording_name}: {e}")
+                    processed_analog_data[recording_name] = None
+            else:
+                print(f"No recording found for {recording_name}")
+                processed_analog_data[recording_name] = None
+        # Optionally, update self.sc_data with the processed data
+        self.analog_data = processed_analog_data
+
 
 class SpikeInterface_wrapper: # for this class, you will pass an instance of a rat class as an argument
     def __init__(self, rat_class_instance, SAVE_DIRECTORY): # for this class, you will pass the class instance of a rat object as an argument
@@ -267,10 +308,6 @@ class SpikeInterface_wrapper: # for this class, you will pass an instance of a r
             try:
                 # Apply bandpass filtering and common average referencing using the preprocessing functions
                 recording_filtered = spre.bandpass_filter(self.data.sc_data[recording], freq_min=300, freq_max=14000)
-                
-                
-                # Apply common average referencing
-                # recording_preprocessed = spre.common_average_reference(recording_filtered, ref_channels='all')
 
                 # Apply a common reference to achieve a CAR-like effect
                 # Setting `reference='global'` and `operator='average'` is akin to a CAR (this replace the old version , common_average_referece)
@@ -574,7 +611,7 @@ class Kilosort_wrapper: # for this class, you will pass the directory containing
             
             if not trial_folders:
                 print("No trial folders found.")
-                
+
                 return
             
             # Initialize the main results dictionary if not already done
