@@ -9,6 +9,9 @@ from kilosort import run_kilosort, DEFAULT_SETTINGS
 import matplotlib.pyplot as plt
 from matplotlib import gridspec, rcParams
 from spikeinterface import concatenate_recordings
+from kilosort.run_kilosort import load_sorting
+import shutil
+import spikeinterface.preprocessing as spre
 
 class Rat: # for this class, you pass the folder containing the rat metadata in excel and matlab files, as well as the intan data in rhd format
     """
@@ -255,35 +258,40 @@ class SpikeInterface_wrapper: # for this class, you will pass an instance of a r
         self.kilosort_results = {}  # Initialize the dictionary to store results
         print(f"Preparing SpikeInterface wrapper for rat {self.RAT_ID}")
 
-    def save_spinalcord_data_to_binary(self, TRIAL_NAMES = None):
-        # NOTE: Data will be saved as np.int16 by default since that is the standard
-        # for ephys data. If you need a different data type for whatever reason
-        # such as `np.uint16`, be sure to update this.
-        
-        # these files will be saved to the subfolder: SAVE_DIRECTORY/binary/TRIAL_NAMES
 
-        if TRIAL_NAMES == None: # if nothing is passed, it will run through all of the trials in the rat object
+    def save_spinalcord_data_to_binary(self, TRIAL_NAMES=None):
+        # If no trial names are supplied, automatically process all trials
+        trial_list = TRIAL_NAMES if TRIAL_NAMES is not None else self.data.sc_data.keys()
+
+        for recording in trial_list:
             try:
-                for recording in self.data.sc_data:
-                    dtype = np.int16
-                    filename, N, c, s, fs, probe_path = io.spikeinterface_to_binary(
-                        self.data.sc_data[recording], os.path.join(self.SAVE_DIRECTORY, 'binary',f"{recording}"), data_name=f'{self.RAT_ID}_{recording}_data.bin', dtype=dtype,
-                        chunksize=60000, export_probe=False, probe_name= self.PROBE_DIRECTORY # export the probe file is false because there is no probe file to begin with
-                        )
-                    print(f'Data saved to {filename}')
-            except:
-                print(f'ERROR: issue importing data for {recording}')
-        else:
-            try:
-                for recording in TRIAL_NAMES:
-                    dtype = np.int16
-                    filename, N, c, s, fs, probe_path = io.spikeinterface_to_binary(
-                        self.data.sc_data[recording], os.path.join(self.SAVE_DIRECTORY, 'binary',f"{recording}"), data_name=f'{self.RAT_ID}_{recording}_data.bin', dtype=dtype,
-                        chunksize=60000, export_probe=False, probe_name= self.PROBE_DIRECTORY # export the probe file is false because there is no probe file to begin with
-                        )
-                    print(f'Data saved to {filename}')
-            except:
-                print(f'ERROR: issue importing data for {recording}')
+                # Apply bandpass filtering and common average referencing using the preprocessing functions
+                recording_filtered = spre.bandpass_filter(self.data.sc_data[recording], freq_min=300, freq_max=14000)
+                
+                
+                # Apply common average referencing
+                # recording_preprocessed = spre.common_average_reference(recording_filtered, ref_channels='all')
+
+                # Apply a common reference to achieve a CAR-like effect
+                # Setting `reference='global'` and `operator='average'` is akin to a CAR (this replace the old version , common_average_referece)
+                recording_preprocessed = spre.common_reference(recording_filtered, reference='global', operator='average')
+
+                dtype = np.int16
+                filename, N, c, s, fs, probe_path = io.spikeinterface_to_binary(
+                    recording_preprocessed, 
+                    os.path.join(self.SAVE_DIRECTORY, 'binary', f"{recording}"), 
+                    data_name=f'{self.RAT_ID}_{recording}_data.bin', 
+                    dtype=dtype,
+                    chunksize=60000, 
+                    export_probe=False, 
+                    probe_name=self.PROBE_DIRECTORY
+                )
+                print(f'Data saved to {filename}')
+
+            except ValueError as e:
+                print(f'ERROR: issue importing data for {recording}',"\n",e)
+                pass
+
 
 class Kilosort_wrapper: # for this class, you will pass the directory containing the binary files and kilosort results (if available)
 
@@ -301,8 +309,61 @@ class Kilosort_wrapper: # for this class, you will pass the directory containing
             # Load existing Kilosort outputs
             self.extract_kilosort_outputs(trial_name)
 
+    def apply_custom_labels_to_trial(self, trial_name, custom_criteria=None):
+        try:
+            results_dir = Path(self.SAVE_DIRECTORY) / 'binary' / trial_name / 'kilosort4'
 
-    def run_kilosort_trial_summary(self, new_settings = None, **kwargs): # runs kilosort in a loop through all of the binary files saved to the SAVE_DIRECTORY/binary folder
+            if not results_dir.exists():
+                print(f"Kilosort directory not found for trial: {trial_name}")
+                return
+
+            # Load sorting results
+            ops, st, clu, similar_templates, is_ref, est_contam_rate, kept_spikes = load_sorting(results_dir)
+
+            cluster_labels = np.unique(clu)
+            fs = ops['fs']  # Sampling rate
+
+            # Option 1: Use existing labels as a starting point
+            label_good = is_ref.copy()
+
+            # Apply custom criteria
+            if custom_criteria is not None:
+                label_good = np.logical_and(label_good, custom_criteria(cluster_labels, st, clu, est_contam_rate, fs))
+            else:
+                # Default criteria: Contamination rate < 0.2 and firing rate >= 1 Hz
+                contam_good = est_contam_rate < 0.2
+                fr_good = np.zeros(cluster_labels.size, dtype=bool)
+                for i, c in enumerate(cluster_labels):
+                    spikes = st[clu == c]
+                    fr = spikes.size / ((spikes.max() - spikes.min()) / fs)
+                    if fr >= 1:
+                        fr_good[i] = True
+                label_good = np.logical_and(label_good, contam_good, fr_good)
+
+            # Save the updated labels
+            ks_labels = ['good' if b else 'mua' for b in label_good]
+
+            # Paths to save the labels
+            save_1 = results_dir / 'cluster_KSLabel.tsv'
+            save_2 = results_dir / 'cluster_group.tsv'
+
+            # Backup existing labels
+            if not (results_dir / 'cluster_KSLabel_backup.tsv').exists():
+                shutil.copyfile(save_1, results_dir / 'cluster_KSLabel_backup.tsv')
+
+            # Write to .tsv files
+            with open(save_1, 'w') as f:
+                f.write('cluster_id\tKSLabel\n')
+                for i, p in enumerate(ks_labels):
+                    f.write(f'{i}\t{p}\n')
+            shutil.copyfile(save_1, save_2)
+
+            print(f"Custom labels applied and saved for trial: {trial_name}")
+
+        except Exception as e:
+            print(f"Error applying custom labels to trial {trial_name}: {e}")
+
+    def run_kilosort_trial_summary(self, new_settings = None, custom_criteria=None,**kwargs): # runs kilosort in a loop through all of the binary files saved to the SAVE_DIRECTORY/binary folder
 
         # Get a list of all folders that contain `.bin` files
         folders_with_bin = []
@@ -325,9 +386,9 @@ class Kilosort_wrapper: # for this class, you will pass the directory containing
                     settings = DEFAULT_SETTINGS
                     settings = {'data_dir': os.path.join(self.SAVE_DIRECTORY, 'binary', folder), 'n_chan_bin': 32}
                 
-                else:
+                elif new_settings == "vf_settings": # use these settings to run kilosort on trials with Von Frey. these seems to produce the best spike clusters.
                     settings = DEFAULT_SETTINGS
-                    settings = new_settings
+                    settings = {'data_dir': os.path.join(self.SAVE_DIRECTORY, 'binary', folder), 'n_chan_bin': 32,'nblocks':0,"batch_size":1500000}
 
                 ops, st, clu, tF, Wall, similar_templates, is_ref, est_contam_rate, kept_spikes = \
                     run_kilosort(
@@ -363,10 +424,17 @@ class Kilosort_wrapper: # for this class, you will pass the directory containing
                     fig.suptitle(os.path.basename(folder))
                     grid = gridspec.GridSpec(3, 3, figure=fig, hspace=0.5, wspace=0.5)
 
-                    ax = fig.add_subplot(grid[0,0])
-                    ax.plot(np.arange(0, ops['Nbatches'])*2, dshift)
-                    ax.set_xlabel('time (sec.)')
-                    ax.set_ylabel('drift (um)')
+                    try:  # Attempt to plot the drift estimate
+                        ax = fig.add_subplot(grid[0, 0])
+                        ax.plot(np.arange(0, ops['Nbatches']) * 2, dshift)
+                        ax.set_xlabel('time (sec.)')
+                        ax.set_ylabel('drift (um)')
+                    except Exception as e:  # Handle any errors in plotting the drift estimate
+                        ax = fig.add_subplot(grid[0, 0])
+                        ax.text(0.5, 0.5, "(no drift estimate,\n nblocks=0)", 
+                                ha='center', va='center', fontsize=12, color='gray')
+                        ax.set_axis_off()  # Optionally remove axes if you want just the text
+
 
                     # Define the specific time window in seconds
                     time_window_start = 10  # Start time in seconds
@@ -490,6 +558,11 @@ class Kilosort_wrapper: # for this class, you will pass the directory containing
                     # raise e
                     pass
 
+            # apply my own criteria for good & bad units
+            trial_name = os.path.basename(folder)
+            self.apply_custom_labels_to_trial(trial_name,custom_criteria=custom_criteria)
+    
+
     def extract_kilosort_outputs(self):
         """
         Load specific Kilosort output files from all trial folders into self.kilosort_results.
@@ -501,6 +574,7 @@ class Kilosort_wrapper: # for this class, you will pass the directory containing
             
             if not trial_folders:
                 print("No trial folders found.")
+                
                 return
             
             # Initialize the main results dictionary if not already done
