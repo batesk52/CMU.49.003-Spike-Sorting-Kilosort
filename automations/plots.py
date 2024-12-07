@@ -3,6 +3,7 @@
 import numpy as np
 import plotly.graph_objects as go
 import matplotlib.pyplot as plt
+import pandas as pd
 
 def interactive_trace(recording, channel_id='A-000', downsample_factor=10, title=None):
     """
@@ -144,3 +145,247 @@ def static_trace(recording, channel_id='A-000', start_time=0, end_time=10, title
     plt.legend()
     plt.tight_layout()
     plt.show()
+
+def vf_pre_post_stim_per_trial(von_frey_analysis_instance):
+    """
+    Parameters:
+    - results: dict returned by analyze_subwindows
+    - von_frey_analysis_instance: An instance of VonFreyAnalysis, so we can access self.rat.qst_trial_notes
+
+    This function will produce a scatter plot for each trial.
+    """
+    for trial_name, data_dict in von_frey_analysis_instance.windowed_results.items():
+        avg_voltage_df = data_dict['avg_voltage_df']
+        firing_rates_df = data_dict['firing_rates_df']
+
+        # Extract the trial number from the trial name
+        # Assuming trial names look like: "VF_10_241125_162725"
+        # and you want the second element after splitting by '_', which is "10"
+        trial_parts = trial_name.split('_')
+        # Make sure to handle any irregularities in naming convention
+        if len(trial_parts) < 2:
+            print(f"Could not extract trial number from trial_name: {trial_name}")
+            continue
+
+        try:
+            trial_num = int(trial_parts[1])
+        except ValueError:
+            print(f"Unable to convert trial number to int from: {trial_parts[1]}")
+            continue
+
+        # Retrieve the frequency from qst_trial_notes using the trial number
+        # This assumes that qst_trial_notes has a row for each trial number
+        # and has a column named 'Freq. (Hz)'
+        if trial_num not in von_frey_analysis_instance.rat.qst_trial_notes.index:
+            print(f"Trial number {trial_num} not found in qst_trial_notes.")
+            continue
+
+        freq_hz = von_frey_analysis_instance.rat.qst_trial_notes.loc[trial_num, 'Freq. (Hz)']
+
+        # Ensure we have 'group' and 'avg_voltage' columns
+        if 'group' not in avg_voltage_df.columns or 'avg_voltage' not in avg_voltage_df.columns:
+            print(f"Missing 'group' or 'avg_voltage' in {trial_name}'s DataFrames.")
+            continue
+        if 'group' not in firing_rates_df.columns:
+            print(f"Missing 'group' in firing_rates_df for {trial_name}.")
+            continue
+
+        non_cluster_cols = ['group']
+        cluster_cols = [c for c in firing_rates_df.columns if c not in non_cluster_cols]
+
+        if len(cluster_cols) == 0:
+            print(f"No cluster columns found in firing_rates_df for {trial_name}.")
+            continue
+
+        # Compute ratio = firing_rate/avg_voltage per cluster & sub-window
+        ratio_df = firing_rates_df.copy()
+        for cluster in cluster_cols:
+            ratio_df[cluster] = ratio_df[cluster] / avg_voltage_df['avg_voltage']
+
+        # Convert to long format
+        ratio_long = ratio_df.melt(id_vars='group', value_vars=cluster_cols, var_name='cluster', value_name='ratio')
+
+        # Compute average ratio per (cluster, group)
+        ratio_summary = ratio_long.groupby(['cluster', 'group'])['ratio'].mean().unstack('group')
+
+        # Ensure both groups exist, fill missing with NaN
+        for grp in ['pre-stim', 'post-stim']:
+            if grp not in ratio_summary.columns:
+                ratio_summary[grp] = np.nan
+
+        plt.figure(figsize=(8, 6))
+
+        # Determine which clusters are above or below the line y=x
+        above_line = ratio_summary['post-stim'] > ratio_summary['pre-stim']
+        below_line = ratio_summary['post-stim'] < ratio_summary['pre-stim']
+        on_line = (ratio_summary['post-stim'] == ratio_summary['pre-stim']) & ~ratio_summary['post-stim'].isna()
+
+        # Scatter plot for clusters that have increased firing (above line)
+        plt.scatter(ratio_summary.loc[above_line, 'pre-stim'],
+                    ratio_summary.loc[above_line, 'post-stim'],
+                    color='green', alpha=0.7, label='Increased firing (post-stim)')
+
+        # Scatter plot for clusters that have decreased firing (below line)
+        plt.scatter(ratio_summary.loc[below_line, 'pre-stim'],
+                    ratio_summary.loc[below_line, 'post-stim'],
+                    color='red', alpha=0.7, label='Decreased firing (post-stim)')
+
+        # If any cluster is exactly on the line
+        if on_line.any():
+            plt.scatter(ratio_summary.loc[on_line, 'pre-stim'],
+                        ratio_summary.loc[on_line, 'post-stim'],
+                        color='blue', alpha=0.7, label='No change')
+
+        # Add a y=x line (trendline)
+        all_vals = np.concatenate([ratio_summary['pre-stim'].dropna(), ratio_summary['post-stim'].dropna()])
+        if len(all_vals) > 0:
+            min_val, max_val = np.nanmin(all_vals), np.nanmax(all_vals)
+            plt.plot([min_val, max_val], [min_val, max_val], 'k--', label='y = x (no change)')
+
+        # Optionally, annotate points with cluster IDs
+        for cluster_id, row in ratio_summary.iterrows():
+            if pd.notna(row['pre-stim']) and pd.notna(row['post-stim']):
+                plt.text(row['pre-stim'], row['post-stim'], str(cluster_id), fontsize=8, alpha=0.7)
+
+        plt.xlabel('Pre-Stim Avg Ratio (firing_rate/voltage)')
+        plt.ylabel('Post-Stim Avg Ratio (firing_rate/voltage)')
+        # Include the trial name and frequency in the title
+        plt.title(f'{trial_name} | Stim Freq: {freq_hz} Hz')
+
+        # plt.grid(True, linestyle='--', alpha=0.5)
+        plt.legend()
+
+        plt.tight_layout()
+        plt.savefig(f"{trial_name}_ratio_scatter.png", dpi=300)
+        plt.show()
+
+
+def vf_pre_post_stim_all_trials(von_frey_analysis_instance):
+
+    """
+    Given the results dictionary from analyze_subwindows, this function:
+    - Combines data from all trials into one plot.
+    - For each trial, computes firing_rate/voltage ratio per cluster (pre-stim and post-stim).
+    - Plots all trials on a single scatter plot with x = pre-stim ratio and y = post-stim ratio.
+    - Points are color-coded by the trial's frequency (Hz).
+    - Adds a linear trendline for each frequency group.
+    - The legend shows different frequencies and their corresponding colors.
+
+    Parameters:
+    - results: dict returned by analyze_subwindows
+    - von_frey_analysis_instance: An instance of VonFreyAnalysis, so we can access self.rat.qst_trial_notes
+
+    This function produces a single scatter plot combining all trials.
+    """
+
+    all_points = []
+
+    for trial_name, data_dict in von_frey_analysis_instance.windowed_results.items():
+        avg_voltage_df = data_dict['avg_voltage_df']
+        firing_rates_df = data_dict['firing_rates_df']
+
+        # Extract the trial number from the trial name
+        trial_parts = trial_name.split('_')
+        if len(trial_parts) < 2:
+            print(f"Could not extract trial number from trial_name: {trial_name}")
+            continue
+
+        try:
+            trial_num = int(trial_parts[1])
+        except ValueError:
+            print(f"Unable to convert trial number to int from: {trial_parts[1]}")
+            continue
+
+        if trial_num not in von_frey_analysis_instance.rat.qst_trial_notes.index:
+            print(f"Trial number {trial_num} not found in qst_trial_notes.")
+            continue
+
+        freq_hz = von_frey_analysis_instance.rat.qst_trial_notes.loc[trial_num, 'Freq. (Hz)']
+
+        if 'group' not in avg_voltage_df.columns or 'avg_voltage' not in avg_voltage_df.columns:
+            print(f"Missing 'group' or 'avg_voltage' in {trial_name}'s DataFrames.")
+            continue
+        if 'group' not in firing_rates_df.columns:
+            print(f"Missing 'group' in firing_rates_df for {trial_name}.")
+            continue
+
+        non_cluster_cols = ['group']
+        cluster_cols = [c for c in firing_rates_df.columns if c not in non_cluster_cols]
+
+        if len(cluster_cols) == 0:
+            print(f"No cluster columns found in firing_rates_df for {trial_name}.")
+            continue
+
+        # Compute ratio = firing_rate/avg_voltage per cluster & sub-window
+        ratio_df = firing_rates_df.copy()
+        for cluster in cluster_cols:
+            ratio_df[cluster] = ratio_df[cluster] / avg_voltage_df['avg_voltage']
+
+        # Convert to long format
+        ratio_long = ratio_df.melt(id_vars='group', value_vars=cluster_cols, var_name='cluster', value_name='ratio')
+
+        # Compute average ratio per (cluster, group)
+        ratio_summary = ratio_long.groupby(['cluster', 'group'])['ratio'].mean().unstack('group')
+
+        # Ensure both groups exist, fill missing with NaN
+        for grp in ['pre-stim', 'post-stim']:
+            if grp not in ratio_summary.columns:
+                ratio_summary[grp] = np.nan
+
+        # Add the data points (pre-stim, post-stim) for each cluster
+        for cluster_id, row in ratio_summary.iterrows():
+            pre_stim_val = row['pre-stim']
+            post_stim_val = row['post-stim']
+            # Only add if both are not NaN
+            if pd.notna(pre_stim_val) and pd.notna(post_stim_val):
+                all_points.append((pre_stim_val, post_stim_val, freq_hz))
+
+    if len(all_points) == 0:
+        print("No valid data points to plot.")
+        return
+
+    # Convert to DataFrame for easier processing
+    all_points_df = pd.DataFrame(all_points, columns=['pre_stim', 'post_stim', 'freq_hz'])
+
+    # Identify unique frequencies
+    unique_freqs = np.unique(all_points_df['freq_hz'])
+
+    # Create a colormap or color cycle for frequencies
+    cmap = plt.get_cmap('tab10')  # tab10 has distinct colors
+    freq_to_color = {}
+    for i, f in enumerate(unique_freqs):
+        freq_to_color[f] = cmap(i % 10)
+
+    # Now create a single figure
+    plt.figure(figsize=(8, 6))
+
+    # Plot all points by frequency
+    for f in unique_freqs:
+        freq_points = all_points_df[all_points_df['freq_hz'] == f]
+
+        # Scatter plot for these points
+        plt.scatter(freq_points['pre_stim'], freq_points['post_stim'], color=freq_to_color[f], alpha=0.7, label=f'{f} Hz')
+
+        # Compute trendline for this frequency group
+        if len(freq_points) > 1:
+            # Perform linear regression using np.polyfit
+            slope, intercept = np.polyfit(freq_points['pre_stim'], freq_points['post_stim'], 1)
+            xvals = np.linspace(freq_points['pre_stim'].min(), freq_points['pre_stim'].max(), 100)
+            yvals = intercept + slope * xvals
+            plt.plot(xvals, yvals, color=freq_to_color[f], linestyle='-', linewidth=2, alpha=0.7)
+
+    # Add a y=x line (trendline for no change)
+    all_vals = np.concatenate([all_points_df['pre_stim'].dropna(), all_points_df['post_stim'].dropna()])
+    if len(all_vals) > 0:
+        min_val, max_val = np.nanmin(all_vals), np.nanmax(all_vals)
+        plt.plot([min_val, max_val], [min_val, max_val], 'k--', label='y = x (no change)')
+
+    plt.xlabel('Pre-Stim Avg Ratio (firing_rate/voltage)')
+    plt.ylabel('Post-Stim Avg Ratio (firing_rate/voltage)')
+    plt.title('Pre vs. Post Stim Ratio: All Trials')
+    plt.grid(True, linestyle='--', alpha=0.5)
+    plt.legend(title='Stim Frequency')
+    plt.tight_layout()
+    plt.savefig("all_trials_ratio_scatter_with_trendlines.png", dpi=300)
+    plt.show()
+
