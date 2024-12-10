@@ -82,7 +82,6 @@ def interactive_trace(recording, channel_id='A-000', downsample_factor=10, title
     # Show the interactive plot
     fig.show()
 
-
 def static_trace(recording, channel_id='A-000', start_time=0, end_time=10, title=None):
     """
     Plots the voltage trace using Matplotlib.
@@ -256,6 +255,7 @@ def vf_pre_post_stim_per_trial(von_frey_analysis_instance):
         plt.legend()
 
         plt.tight_layout()
+        # commenting out the save because I don't want to bother with making a smart functionion for saving directory
         # plt.savefig(f"{trial_name}_ratio_scatter.png", dpi=300)
         plt.show()
 
@@ -385,5 +385,7 @@ def vf_pre_post_stim_all_trials(von_frey_analysis_instance):
     plt.grid(True, linestyle='--', alpha=0.5)
     plt.legend(title='Stim Frequency')
     plt.tight_layout()
+    # commenting out the save because I don't want to bother with making a smart functionion for saving directory
     # plt.savefig("all_trials_ratio_scatter_with_trendlines.png", dpi=300)
     plt.show()
+
