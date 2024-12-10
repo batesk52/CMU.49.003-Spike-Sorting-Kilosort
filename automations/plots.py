@@ -256,9 +256,8 @@ def vf_pre_post_stim_per_trial(von_frey_analysis_instance):
         plt.legend()
 
         plt.tight_layout()
-        plt.savefig(f"{trial_name}_ratio_scatter.png", dpi=300)
+        # plt.savefig(f"{trial_name}_ratio_scatter.png", dpi=300)
         plt.show()
-
 
 def vf_pre_post_stim_all_trials(von_frey_analysis_instance):
 
@@ -386,6 +385,5 @@ def vf_pre_post_stim_all_trials(von_frey_analysis_instance):
     plt.grid(True, linestyle='--', alpha=0.5)
     plt.legend(title='Stim Frequency')
     plt.tight_layout()
-    plt.savefig("all_trials_ratio_scatter_with_trendlines.png", dpi=300)
+    # plt.savefig("all_trials_ratio_scatter_with_trendlines.png", dpi=300)
     plt.show()
-
