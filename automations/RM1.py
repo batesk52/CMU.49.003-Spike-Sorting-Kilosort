@@ -28,6 +28,7 @@ class Rat: # for this class, you pass the folder containing the rat metadata in 
     Note that the `Rat` class assumes a specific directory structure and file naming convention, which is not explicitly documented in the code.
     
     """
+
     def __init__(self, DATA_DIRECTORY, PROBE_DIRECTORY, RAT_ID, **kwargs):
         
         self.RAT_ID = RAT_ID
@@ -96,7 +97,6 @@ class Rat: # for this class, you pass the folder containing the rat metadata in 
         trial_notes.index = trial_notes["Trial Number"]
         self.qst_trial_notes = trial_notes.iloc[6:,:]
 
-
     def import_matlab_files(self):
         # Dictionary to store data from all .mat files
         # Iterate over all files in the directory
@@ -116,6 +116,7 @@ class Rat: # for this class, you pass the folder containing the rat metadata in 
         for folder_name in os.listdir(data_path):
             self.trial_names.append(folder_name)
             folder_path = os.path.join(data_path, folder_name)
+            
             if os.path.isdir(folder_path):
                 rhd_file = f'{folder_name}.rhd'
                 rhd_file_path = os.path.join(folder_path, rhd_file)
@@ -153,11 +154,13 @@ class Rat: # for this class, you pass the folder containing the rat metadata in 
                     except:
                         print(f'Error reading stream 4 for {folder_name}. continuing...')
                         pass
+
     """
     Separate channels according to their function based on channel IDs.
-    Channels 0-31: Intraspinal recordings (Neural Nexus probe)
-    Channel 32: Nerve cuff electrode (Peripheral nerve)
-    Channel 33: Muscle response (EMG)
+    stream 0, Channels 0-31: Intraspinal recordings (Neural Nexus probe)
+    Stream 0, Channel 32: Nerve cuff electrode (Peripheral nerve)
+    Stream 0, Channel 33: Muscle response (EMG)
+    Stream 3, Channels 1 & 2: analog input for stimulation voltage and von frey
     """
 
     def get_sc_data(self):
@@ -167,6 +170,7 @@ class Rat: # for this class, you pass the folder containing the rat metadata in 
             except:
                 self.sc_data[recording] = None  
                 print(f'Error recording SC data for {recording}')
+    
     def get_nerve_cuff_data(self):
         for recording in self.intan_recordings_stream0:
             try:
@@ -193,7 +197,6 @@ class Rat: # for this class, you pass the folder containing the rat metadata in 
                 self.analog_data[recording] = None
                 print(f'Error recording von frey data for {recording}')
                 pass
-    
     
     def slice_and_concatenate_recording(self, base_recording, first_window=(0, 1050000), last_window=None):
         """
@@ -288,8 +291,8 @@ class Rat: # for this class, you pass the folder containing the rat metadata in 
         # Optionally, update self.sc_data with the processed data
         self.analog_data = processed_analog_data
 
-
 class SpikeInterface_wrapper: # for this class, you will pass an instance of a rat class as an argument
+
     def __init__(self, rat_class_instance, SAVE_DIRECTORY): # for this class, you will pass the class instance of a rat object as an argument
         self.RAT_ID = rat_class_instance.RAT_ID
         self.data = rat_class_instance
@@ -298,7 +301,6 @@ class SpikeInterface_wrapper: # for this class, you will pass an instance of a r
         self.SAVE_DIRECTORY = SAVE_DIRECTORY
         self.kilosort_results = {}  # Initialize the dictionary to store results
         print(f"Preparing SpikeInterface wrapper for rat {self.RAT_ID}")
-
 
     def save_spinalcord_data_to_binary(self, TRIAL_NAMES=None):
         # If no trial names are supplied, automatically process all trials
@@ -328,6 +330,57 @@ class SpikeInterface_wrapper: # for this class, you will pass an instance of a r
             except ValueError as e:
                 print(f'ERROR: issue importing data for {recording}',"\n",e)
                 pass
+
+
+    def export_raw_spikes_and_von_frey_all_trials(self, kilosort_wrapper_instance):
+        """
+        Iterates over every trial found in kilosort_wrapper_instance.kilosort_results
+        and exports spike times, spike clusters, and Von Frey data to CSV files placed
+        in the 'tables' folder of SAVE_DIRECTORY.
+
+        Spikes will be exported regardless of whether Von Frey data is found.
+        If no Von Frey data is available, it will print a message and skip that part.
+        """
+        
+        tables_dir = os.path.join(self.SAVE_DIRECTORY, 'tables')
+        if not os.path.exists(tables_dir):
+            os.makedirs(tables_dir)
+
+        for trial_name, ks_data in kilosort_wrapper_instance.kilosort_results.items():
+            # Extract spike data (always do this)
+            spike_times = ks_data['spike_times']
+            spike_clusters = ks_data['spike_clusters']
+
+            # Save spike data to CSV
+            spike_csv_path = os.path.join(tables_dir, f"{trial_name}_spikes.csv")
+            spike_df = pd.DataFrame({'spike_times': spike_times, 'spike_clusters': spike_clusters})
+            spike_df.to_csv(spike_csv_path, index=False)
+            print(f"Spike data exported for trial {trial_name} to {spike_csv_path}")
+
+            # Attempt to extract Von Frey data if available
+            if trial_name in self.data.analog_data and self.data.analog_data[trial_name] is not None:
+                von_frey_recording = self.data.analog_data[trial_name]
+                channel_ids = von_frey_recording.get_channel_ids()
+                
+                if 'ANALOG-IN-2' in channel_ids:
+                    try:
+                        von_frey_data = von_frey_recording.get_traces(channel_ids=['ANALOG-IN-2'], return_scaled=True).flatten()
+                        sampling_rate = von_frey_recording.get_sampling_frequency()
+
+                        # Save Von Frey data to CSV
+                        von_frey_csv_path = os.path.join(tables_dir, f"{trial_name}_von_frey.csv")
+                        von_frey_df = pd.DataFrame({'von_frey_voltage': von_frey_data})
+                        von_frey_df.to_csv(von_frey_csv_path, index=False)
+                        with open(von_frey_csv_path, 'a') as f:
+                            f.write(f"# sampling_rate: {sampling_rate}\n")
+
+                        print(f"Von Frey data exported for trial {trial_name} to {von_frey_csv_path}")
+                    except Exception as e:
+                        print(f"Error processing Von Frey data for trial {trial_name}: {e}")
+                else:
+                    print(f"ANALOG-IN-2 channel not found for trial {trial_name}. No Von Frey data exported.")
+            else:
+                print(f"No analog data found for trial {trial_name}. No Von Frey data exported.")
 
 
 class Kilosort_wrapper: # for this class, you will pass the directory containing the binary files and kilosort results (if available)
@@ -598,9 +651,9 @@ class Kilosort_wrapper: # for this class, you will pass the directory containing
             # apply my own criteria for good & bad units
             trial_name = os.path.basename(folder)
             self.apply_custom_labels_to_trial(trial_name,custom_criteria=custom_criteria)
-    
 
     def extract_kilosort_outputs(self):
+
         """
         Load specific Kilosort output files from all trial folders into self.kilosort_results.
         """

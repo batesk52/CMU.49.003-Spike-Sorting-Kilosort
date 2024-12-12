@@ -259,6 +259,7 @@ def vf_pre_post_stim_per_trial(von_frey_analysis_instance):
         # plt.savefig(f"{trial_name}_ratio_scatter.png", dpi=300)
         plt.show()
 
+
 def vf_pre_post_stim_all_trials(von_frey_analysis_instance):
 
     """
@@ -267,7 +268,7 @@ def vf_pre_post_stim_all_trials(von_frey_analysis_instance):
     - For each trial, computes firing_rate/voltage ratio per cluster (pre-stim and post-stim).
     - Plots all trials on a single scatter plot with x = pre-stim ratio and y = post-stim ratio.
     - Points are color-coded by the trial's frequency (Hz).
-    - Adds a linear trendline for each frequency group.
+    - Adds a linear trendline for each frequency group with intercept fixed at 0.
     - The legend shows different frequencies and their corresponding colors.
 
     Parameters:
@@ -365,12 +366,12 @@ def vf_pre_post_stim_all_trials(von_frey_analysis_instance):
         # Scatter plot for these points
         plt.scatter(freq_points['pre_stim'], freq_points['post_stim'], color=freq_to_color[f], alpha=0.7, label=f'{f} Hz')
 
-        # Compute trendline for this frequency group
+        # Compute trendline for this frequency group with intercept fixed at 0
         if len(freq_points) > 1:
-            # Perform linear regression using np.polyfit
-            slope, intercept = np.polyfit(freq_points['pre_stim'], freq_points['post_stim'], 1)
+            # Perform linear regression with intercept fixed at 0
+            slope = np.sum(freq_points['pre_stim'] * freq_points['post_stim']) / np.sum(freq_points['pre_stim'] ** 2)
             xvals = np.linspace(freq_points['pre_stim'].min(), freq_points['pre_stim'].max(), 100)
-            yvals = intercept + slope * xvals
+            yvals = slope * xvals
             plt.plot(xvals, yvals, color=freq_to_color[f], linestyle='-', linewidth=2, alpha=0.7)
 
     # Add a y=x line (trendline for no change)
@@ -385,7 +386,175 @@ def vf_pre_post_stim_all_trials(von_frey_analysis_instance):
     plt.grid(True, linestyle='--', alpha=0.5)
     plt.legend(title='Stim Frequency')
     plt.tight_layout()
-    # commenting out the save because I don't want to bother with making a smart functionion for saving directory
-    # plt.savefig("all_trials_ratio_scatter_with_trendlines.png", dpi=300)
     plt.show()
 
+def plot_von_frey_raster_and_trace(von_frey_analysis_instance, trial_name, title=None):
+    # get spike data
+    if trial_name not in von_frey_analysis_instance.spikes.kilosort_results:
+        print(f"No kilosort results found for trial: {trial_name}.")
+        return
+    kilosort_output = von_frey_analysis_instance.spikes.kilosort_results[trial_name]
+    st = kilosort_output['spike_times']    # Spike times in samples
+    clu = kilosort_output['spike_clusters']# Corresponding cluster IDs
+    fs = kilosort_output['ops']['fs']      # Sampling frequency
+
+    # If you have a channel map or mapping for clusters to channels
+    # For example, if 'chan_best' maps cluster index to a channel number
+    # or if you have a known channel layout:
+    # chan_best = kilosort_output.get('chan_best', None)
+    # chan_map = kilosort_output.get('chan_map', None)
+    # If not available, just plot by cluster index
+    # Here we assume a simple channel mapping based on clusters:
+    unique_clusters = np.unique(clu)
+    cluster_to_channel = {c: i for i, c in enumerate(unique_clusters)}
+
+    # Step 2: Retrieve analog voltage data from ANALOG-IN-2
+    if trial_name not in von_frey_analysis_instance.signals.data.analog_data:
+        print(f"Trial '{trial_name}' not found in analog_data.")
+        return
+    recording = von_frey_analysis_instance.signals.data.analog_data[trial_name]
+    sampling_rate = recording.get_sampling_frequency()
+    if 'ANALOG-IN-2' not in recording.get_channel_ids():
+        print(f"ANALOG-IN-2 not found in trial '{trial_name}'.")
+        return
+
+    von_frey_data = recording.get_traces(channel_ids=['ANALOG-IN-2'], return_scaled=True).flatten()
+    num_samples = len(von_frey_data)
+    time_vector = np.arange(num_samples) / sampling_rate
+
+    # Step 3: Convert spike times to seconds
+    spike_times_sec = st / fs
+
+    # Step 4: Create a figure with two subplots: top for voltage, bottom for raster
+    fig = plt.figure(figsize=(12, 8))
+    gs = fig.add_gridspec(2, 1, height_ratios=[1, 2])
+
+    # Top: Von Frey analog voltage trace
+    ax_top = fig.add_subplot(gs[0])
+    ax_top.plot(time_vector, von_frey_data, color='blue', linewidth=0.5)
+    ax_top.set_ylabel('Voltage (uV)')
+    if title is not None:
+        ax_top.set_title(title)
+    else:
+        ax_top.set_title(f"Von Frey Analog Voltage Trace: {trial_name}")
+    ax_top.set_xlim([0, time_vector[-1]])
+
+    # Step 5: Raster plot of spikes
+    # Convert clusters to channel indices (or use cluster index directly)
+    spike_channels = np.array([cluster_to_channel[c] for c in clu])
+
+    ax_bottom = fig.add_subplot(gs[1])
+    ax_bottom.scatter(spike_times_sec, spike_channels, s=1, color='k', alpha=0.5)
+    ax_bottom.set_xlabel('Time (sec)')
+    ax_bottom.set_ylabel('Channel (derived from cluster)')
+    ax_bottom.set_title("Raster Plot of Spikes")
+    ax_bottom.set_xlim([0, time_vector[-1]])
+    ax_bottom.set_ylim([np.max(spike_channels), np.min(spike_channels)]) # if you want to invert
+
+    plt.tight_layout()
+    plt.show()
+
+
+import numpy as np
+import matplotlib.pyplot as plt
+from collections import Counter
+
+def plot_vf_spike_raster_filtered_units(von_frey_analysis_instance, trial_name, corr_threshold=0.1, title=None):
+    # Step 1: Extract spike data and Von Frey data
+    if trial_name not in von_frey_analysis_instance.spikes.kilosort_results:
+        print(f"No kilosort results for trial '{trial_name}'.")
+        return
+
+    kilosort_output = von_frey_analysis_instance.spikes.kilosort_results[trial_name]
+    st = kilosort_output['spike_times']  # spike times in samples
+    clu = kilosort_output['spike_clusters']  # cluster assignments
+    fs = kilosort_output['ops']['fs']  # Sampling rate
+    spike_times_sec = st / fs
+
+    # Retrieve Von Frey data
+    if trial_name not in von_frey_analysis_instance.signals.data.analog_data:
+        print(f"Trial '{trial_name}' not found in analog_data.")
+        return
+
+    recording = von_frey_analysis_instance.signals.data.analog_data[trial_name]
+    sampling_rate_vf = recording.get_sampling_frequency()
+
+    if 'ANALOG-IN-2' not in recording.get_channel_ids():
+        print(f"ANALOG-IN-2 not found in trial '{trial_name}'.")
+        return
+
+    von_frey_data = recording.get_traces(channel_ids=['ANALOG-IN-2'], return_scaled=True).flatten()
+    num_samples = len(von_frey_data)
+    time_vector = np.arange(num_samples) / sampling_rate_vf
+    all_clusters = np.unique(clu)
+
+    # Step 2: Compute correlation and filter clusters
+    cluster_correlations = {}
+    for cluster in all_clusters:
+        cluster_spike_times = np.sort(spike_times_sec[clu == cluster])
+
+        # If fewer than 2 spikes, correlation is set to 0
+        if len(cluster_spike_times) < 2:
+            cluster_correlations[cluster] = 0
+            continue
+
+        # Create "time since last spike" array
+        time_since_last_spike = np.zeros(num_samples, dtype=float)
+        last_spike_idx = 0
+        spike_idx = 0
+        for i in range(num_samples):
+            current_time = time_vector[i]
+            while spike_idx < len(cluster_spike_times) and cluster_spike_times[spike_idx] <= current_time:
+                last_spike_idx = spike_idx
+                spike_idx += 1
+            time_since_last_spike[i] = current_time - cluster_spike_times[last_spike_idx]
+
+        # Compute correlation
+        if np.std(time_since_last_spike) == 0 or np.std(von_frey_data) == 0:
+            corr = 0
+        else:
+            corr = np.corrcoef(time_since_last_spike, von_frey_data)[0, 1]
+        cluster_correlations[cluster] = corr
+
+    filtered_clusters = [c for c, corr_val in cluster_correlations.items() if abs(corr_val) >= corr_threshold]
+
+    if len(filtered_clusters) == 0:
+        print(f"No clusters meet the correlation threshold for trial '{trial_name}'.")
+        return
+
+    # Step 3 & 4: Create figure with two subplots
+    fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(10, 8), sharex=True)
+    ax_top, ax_bottom = axes
+
+    # Plot Von Frey voltage trace (entire trial)
+    ax_top.plot(time_vector, von_frey_data, color='blue')
+    ax_top.set_ylabel('Voltage (uV)')
+    
+    if title is not None:
+        ax_top.set_title(title)
+    else:
+        ax_top.set_title(f'{trial_name} - Von Frey Voltage Trace & Filtered Spike Raster')
+
+
+    ## I need to modify my Von Frey class to store correlated units. that way I don't have duplicate code
+
+    # Plot raster of filtered units' spikes
+    # Create a channel or cluster map for ordering (adjust if needed)
+    # For simplicity, assume cluster IDs are arbitrary. We will assign each filtered unit
+    # a y-position based on its sorted order.
+    filtered_clusters_sorted = np.sort(filtered_clusters)
+    cluster_to_y = {clu_id: idx for idx, clu_id in enumerate(filtered_clusters_sorted)}
+
+    spike_mask = np.isin(clu, filtered_clusters)
+    ax_bottom.scatter(spike_times_sec[spike_mask], 
+                      [cluster_to_y[c] for c in clu[spike_mask]], 
+                      s=0.5, color='k', alpha=0.5)
+
+    ax_bottom.set_ylabel('Filtered Units')
+    ax_bottom.set_xlabel('Time (sec)')
+    ax_bottom.set_yticks(range(len(filtered_clusters_sorted)))
+    ax_bottom.set_yticklabels(filtered_clusters_sorted)
+    ax_bottom.set_xlim([time_vector[0], time_vector[-1]])
+
+    plt.tight_layout()
+    plt.show()

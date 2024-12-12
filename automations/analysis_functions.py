@@ -24,7 +24,7 @@ class VonFreyAnalysis:
         self.cluster_firing_rates = {} #  dictionary of dataframes containing cluster firing rates during Von Frey intervals, for each trial
         self.windowed_results = {} # dictionary of dataframes containing cluster firing rates during the windowed Von Frey intervals, for each trial
 
-    def extract_von_frey_windows(self, TRIAL_NAMES=None, amplitude_threshold=225000, start_buffer=0.01, end_buffer=0.01):
+    def extract_von_frey_windows(self, TRIAL_NAMES=None, amplitude_threshold=225000, start_buffer=0.001, end_buffer=0.001): #changed to milliseconds
         """
         Extract time windows where Von Frey stimulus is applied.
 
@@ -331,18 +331,24 @@ class VonFreyAnalysis:
 
         return pd.DataFrame({'avg_voltage': avg_voltages})
 
-    def compute_unit_firing_rates_for_subwindows(self, trial_name, subwindow_start_times, subwindow_end_times):
+    def compute_unit_firing_rates_for_subwindows(self, trial_name, subwindow_start_times, subwindow_end_times, corr_threshold=0.1):
         """
-        Compute firing rates for each unit during the given sub-windows for a single trial.
+        Compute firing rates for each unit during the given sub-windows for a single trial,
+        and filter clusters based on correlation with the Von Frey signal.
+
+        Instead of binning spikes, we create a continuous time-series per cluster that encodes
+        the time since the last spike at each sample. This gives a continuous measure that we
+        can correlate directly with von_frey_data.
 
         Parameters:
         - trial_name: str, name of the trial
         - subwindow_start_times: array of start times for each sub-window
         - subwindow_end_times: array of end times for each sub-window
+        - corr_threshold: float, absolute correlation threshold below which clusters are excluded
 
         Returns:
         - A DataFrame where each row is a sub-window and each column is a cluster,
-          containing the firing rate (Hz).
+        containing the firing rate (Hz), after filtering by correlation.
         """
         if trial_name not in self.spikes.kilosort_results:
             print(f"No kilosort results for trial '{trial_name}'.")
@@ -351,24 +357,84 @@ class VonFreyAnalysis:
         kilosort_output = self.spikes.kilosort_results[trial_name]
         st = kilosort_output['spike_times']  # spike times in samples
         clu = kilosort_output['spike_clusters']  # cluster assignments
-        fs = kilosort_output['ops']['fs']
+        fs = kilosort_output['ops']['fs']  # Sampling rate used during spike sorting
 
         spike_times_sec = st / fs
         all_clusters = np.unique(clu)
 
-        firing_rates_intervals = []
+        # Retrieve Von Frey data
+        if trial_name not in self.signals.data.analog_data:
+            print(f"Trial '{trial_name}' not found in analog_data.")
+            return pd.DataFrame()
 
+        recording = self.signals.data.analog_data[trial_name]
+        sampling_rate_vf = recording.get_sampling_frequency()
+        if 'ANALOG-IN-2' not in recording.get_channel_ids():
+            print(f"ANALOG-IN-2 not found in trial '{trial_name}'.")
+            return pd.DataFrame()
+
+        von_frey_data = recording.get_traces(channel_ids=['ANALOG-IN-2'], return_scaled=True).flatten()
+        num_samples = len(von_frey_data)
+        total_duration = num_samples / sampling_rate_vf
+
+        # Create a time vector for von_frey_data
+        time_vector = np.arange(num_samples) / sampling_rate_vf
+
+        # Compute "time since last spike" arrays for each cluster
+        cluster_correlations = {}
+        for cluster in all_clusters:
+            # Get spike times for this cluster
+            cluster_spike_times = np.sort(spike_times_sec[clu == cluster])
+
+            # If no spikes or just one spike, correlation likely meaningless
+            if len(cluster_spike_times) < 2:
+                cluster_correlations[cluster] = 0
+                continue
+
+            # Create an array to store time since last spike at each sample
+            time_since_last_spike = np.zeros(num_samples, dtype=float)
+
+            # We will walk through the spike times and fill in intervals
+            last_spike_idx = 0
+            spike_idx = 0
+
+            for i in range(num_samples):
+                current_time = time_vector[i]
+
+                # Move spike_idx forward if the next spike is in the past
+                while spike_idx < len(cluster_spike_times) and cluster_spike_times[spike_idx] <= current_time:
+                    last_spike_idx = spike_idx
+                    spike_idx += 1
+
+                # time since last spike = current_time - cluster_spike_times[last_spike_idx]
+                time_since_last_spike[i] = current_time - cluster_spike_times[last_spike_idx]
+
+            # Compute correlation with von_frey_data
+            if np.std(time_since_last_spike) == 0 or np.std(von_frey_data) == 0:
+                corr = 0
+            else:
+                corr = np.corrcoef(time_since_last_spike, von_frey_data)[0, 1]
+
+            cluster_correlations[cluster] = corr
+
+        # Filter clusters based on correlation threshold
+        filtered_clusters = [c for c, corr in cluster_correlations.items() if abs(corr) >= corr_threshold]
+
+        if len(filtered_clusters) == 0:
+            print(f"All clusters excluded for trial '{trial_name}' based on correlation threshold.")
+            return pd.DataFrame()
+
+        # Now compute firing rates for the filtered clusters within each sub-window
+        firing_rates_intervals = []
         for start, end in zip(subwindow_start_times, subwindow_end_times):
             window_duration = end - start
-            # Find spikes in window
             indices_in_window = np.where((spike_times_sec >= start) & (spike_times_sec < end))[0]
             clusters_in_window = clu[indices_in_window]
 
-            # Count spikes per cluster
             cluster_spike_counts = Counter(clusters_in_window)
 
-            firing_rates = {cluster: 0 for cluster in all_clusters}
-            for cluster in all_clusters:
+            firing_rates = {}
+            for cluster in filtered_clusters:
                 count = cluster_spike_counts.get(cluster, 0)
                 firing_rates[cluster] = count / window_duration if window_duration > 0 else np.nan
 
@@ -377,7 +443,7 @@ class VonFreyAnalysis:
         firing_rates_df = pd.DataFrame(firing_rates_intervals).fillna(0)
         return firing_rates_df
 
-    def analyze_subwindows(self, TRIAL_NAMES=None, amplitude_threshold=225000, start_buffer=0.1, end_buffer=0.05, subwindow_width=0.5):
+    def analyze_subwindows(self, TRIAL_NAMES=None, amplitude_threshold=225000, start_buffer=0.001, end_buffer=0.001, subwindow_width=0.5, corr_threshold=0.01):
         """
         Example higher-level method that:
         1. Extracts Von Frey windows.
@@ -418,7 +484,7 @@ class VonFreyAnalysis:
             avg_voltage_df = self.compute_average_von_frey_voltage(trial_name, subwindow_starts, subwindow_ends)
 
             # Compute firing rates
-            firing_rates_df = self.compute_unit_firing_rates_for_subwindows(trial_name, subwindow_starts, subwindow_ends)
+            firing_rates_df = self.compute_unit_firing_rates_for_subwindows(trial_name, subwindow_starts, subwindow_ends,corr_threshold=corr_threshold)
 
             # Classify windows into 'pre-stim' or 'post-stim' based on start time
             # Assuming total duration ~70 seconds, first 35s = pre-stim, last 35s = post-stim
