@@ -350,6 +350,8 @@ class VonFreyAnalysis:
         - A DataFrame where each row is a sub-window and each column is a cluster,
         containing the firing rate (Hz), after filtering by correlation.
         """
+
+        # Retrieve kilosort results
         if trial_name not in self.spikes.kilosort_results:
             print(f"No kilosort results for trial '{trial_name}'.")
             return pd.DataFrame()

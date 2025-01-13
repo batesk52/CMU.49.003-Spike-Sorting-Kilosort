@@ -4,6 +4,7 @@ import numpy as np
 import plotly.graph_objects as go
 import matplotlib.pyplot as plt
 import pandas as pd
+from collections import Counter
 
 def interactive_trace(recording, channel_id='A-000', downsample_factor=10, title=None):
     """
@@ -241,7 +242,7 @@ def vf_pre_post_stim_per_trial(von_frey_analysis_instance):
             min_val, max_val = np.nanmin(all_vals), np.nanmax(all_vals)
             plt.plot([min_val, max_val], [min_val, max_val], 'k--', label='y = x (no change)')
 
-        # Optionally, annotate points with cluster IDs
+        # annotate points with cluster IDs (if desired)
         for cluster_id, row in ratio_summary.iterrows():
             if pd.notna(row['pre-stim']) and pd.notna(row['post-stim']):
                 plt.text(row['pre-stim'], row['post-stim'], str(cluster_id), fontsize=8, alpha=0.7)
@@ -251,7 +252,7 @@ def vf_pre_post_stim_per_trial(von_frey_analysis_instance):
         # Include the trial name and frequency in the title
         plt.title(f'{trial_name} | Stim Freq: {freq_hz} Hz')
 
-        # plt.grid(True, linestyle='--', alpha=0.5)
+        # plt.grid(True, linestyle='--', alpha=0.5) # uncomment to add grid
         plt.legend()
 
         plt.tight_layout()
@@ -388,6 +389,8 @@ def vf_pre_post_stim_all_trials(von_frey_analysis_instance):
     plt.tight_layout()
     plt.show()
 
+
+# can I get rid of this?
 def plot_von_frey_raster_and_trace(von_frey_analysis_instance, trial_name, title=None):
     # get spike data
     if trial_name not in von_frey_analysis_instance.spikes.kilosort_results:
@@ -453,11 +456,6 @@ def plot_von_frey_raster_and_trace(von_frey_analysis_instance, trial_name, title
 
     plt.tight_layout()
     plt.show()
-
-
-import numpy as np
-import matplotlib.pyplot as plt
-from collections import Counter
 
 def plot_vf_spike_raster_filtered_units(von_frey_analysis_instance, trial_name, corr_threshold=0.1, title=None):
     # Step 1: Extract spike data and Von Frey data

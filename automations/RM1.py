@@ -112,6 +112,15 @@ class Rat: # for this class, you pass the folder containing the rat metadata in 
 
     # Import all intan data from rhd file and store in a dictionary
     def import_intan_data(self):
+
+        """
+        Separate channels according to their function based on channel IDs.
+        stream 0, Channels 0-31: Intraspinal recordings (Neural Nexus probe)
+        Stream 0, Channel 32: Nerve cuff electrode (Peripheral nerve)
+        Stream 0, Channel 33: Muscle response (EMG)
+        Stream 3, Channels 1 & 2: analog input for stimulation voltage and von frey
+        """
+
         data_path = os.path.join(self.DATA_DIRECTORY, self.RAT_ID,self.RAT_ID)
         for folder_name in os.listdir(data_path):
             self.trial_names.append(folder_name)
@@ -154,14 +163,6 @@ class Rat: # for this class, you pass the folder containing the rat metadata in 
                     except:
                         print(f'Error reading stream 4 for {folder_name}. continuing...')
                         pass
-
-    """
-    Separate channels according to their function based on channel IDs.
-    stream 0, Channels 0-31: Intraspinal recordings (Neural Nexus probe)
-    Stream 0, Channel 32: Nerve cuff electrode (Peripheral nerve)
-    Stream 0, Channel 33: Muscle response (EMG)
-    Stream 3, Channels 1 & 2: analog input for stimulation voltage and von frey
-    """
 
     def get_sc_data(self):
         for recording in self.intan_recordings_stream0:
@@ -331,7 +332,6 @@ class SpikeInterface_wrapper: # for this class, you will pass an instance of a r
                 print(f'ERROR: issue importing data for {recording}',"\n",e)
                 pass
 
-
     def export_raw_spikes_and_von_frey_all_trials(self, kilosort_wrapper_instance):
         """
         Iterates over every trial found in kilosort_wrapper_instance.kilosort_results
@@ -381,7 +381,6 @@ class SpikeInterface_wrapper: # for this class, you will pass an instance of a r
                     print(f"ANALOG-IN-2 channel not found for trial {trial_name}. No Von Frey data exported.")
             else:
                 print(f"No analog data found for trial {trial_name}. No Von Frey data exported.")
-
 
 class Kilosort_wrapper: # for this class, you will pass the directory containing the binary files and kilosort results (if available)
 
