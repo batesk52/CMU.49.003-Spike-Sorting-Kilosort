@@ -5,8 +5,10 @@ import plotly.graph_objects as go
 import matplotlib.pyplot as plt
 import pandas as pd
 from collections import Counter
+from math import ceil
+from pathlib import Path
 
-def interactive_trace(recording, channel_id='A-000', downsample_factor=10, title=None):
+def interactive_trace(recording, channel_id='A-000', downsample_factor=10, title=None,save_csv=None):
     """
     Plots the voltage trace using Plotly.
 
@@ -53,6 +55,14 @@ def interactive_trace(recording, channel_id='A-000', downsample_factor=10, title
     # Optional: Downsample data
     time = time[::downsample_factor]
     voltage = voltage[::downsample_factor]
+
+    # --- CSV Export (optional) ---
+    if save_csv is not None:
+        # Create a DataFrame with time and voltage columns
+        df = pd.DataFrame({'time_s': time, 'voltage_uV': voltage})
+        df.to_csv(save_csv, index=False)
+        print(f"Exported time-voltage data to CSV: {save_csv}")
+
 
     # Create the plot
     fig = go.Figure()
@@ -260,7 +270,6 @@ def vf_pre_post_stim_per_trial(von_frey_analysis_instance):
         # plt.savefig(f"{trial_name}_ratio_scatter.png", dpi=300)
         plt.show()
 
-
 def vf_pre_post_stim_all_trials(von_frey_analysis_instance):
 
     """
@@ -389,6 +398,171 @@ def vf_pre_post_stim_all_trials(von_frey_analysis_instance):
     plt.tight_layout()
     plt.show()
 
+def vf_pre_post_stim_all_trials_correlated(self, corr_threshold=0.1):
+    """
+    Given the results dictionary from analyze_subwindows, this function:
+    - Combines data from all trials into one plot.
+    - For each trial, computes firing_rate/voltage ratio per cluster (pre-stim and post-stim).
+    - **Only** includes clusters with correlation >= corr_threshold.
+    - Plots all trials on a single scatter plot with x = pre-stim ratio and y = post-stim ratio.
+    - Points are color-coded by the trial's frequency (Hz).
+    - Adds a linear trendline for each frequency group with intercept fixed at 0.
+    - The legend shows different frequencies and their corresponding colors.
+
+    Parameters
+    ----------
+    corr_threshold : float
+        The absolute correlation threshold. Only clusters with
+        abs(corr) >= corr_threshold will be included in the plot.
+
+    Returns
+    -------
+    None
+    """
+
+    # Collect data across all trials into one list
+    all_points = []
+
+    # Loop through each trial's results
+    for trial_name, data_dict in self.windowed_results.items():
+        # Retrieve DataFrames from analyze_subwindows
+        avg_voltage_df = data_dict['avg_voltage_df']
+        firing_rates_df = data_dict['firing_rates_df']
+
+        # 1) Identify the trial number from trial_name if applicable
+        trial_parts = trial_name.split('_')
+        if len(trial_parts) < 2:
+            print(f"Could not extract trial number from trial_name: {trial_name}")
+            continue
+
+        try:
+            trial_num = int(trial_parts[1])
+        except ValueError:
+            print(f"Unable to convert trial number to int from: {trial_parts[1]}")
+            continue
+
+        # 2) Check if we have the needed correlation info
+        if trial_name not in self.inv_isi_correlations:
+            print(f"No inverse-ISI correlation data found for {trial_name}. Skipping.")
+            continue
+
+        correlations_dict = self.inv_isi_correlations[trial_name]  # {cluster_id: corr_value}
+
+        # 3) Retrieve the frequency (Hz) from your qst_trial_notes or similar
+        #    If your code uses qst_trial_notes in self.rat, do something like:
+        if trial_num not in self.rat.qst_trial_notes.index:
+            print(f"Trial number {trial_num} not found in qst_trial_notes.")
+            continue
+
+        freq_hz = self.rat.qst_trial_notes.loc[trial_num, 'Freq. (Hz)']
+
+        # 4) Check columns
+        if 'group' not in avg_voltage_df.columns or 'avg_voltage' not in avg_voltage_df.columns:
+            print(f"Missing 'group' or 'avg_voltage' in {trial_name}'s DataFrames.")
+            continue
+        if 'group' not in firing_rates_df.columns:
+            print(f"Missing 'group' in firing_rates_df for {trial_name}.")
+            continue
+
+        # 5) Identify cluster columns and filter them by correlation threshold
+        non_cluster_cols = ['group']
+        cluster_cols = [c for c in firing_rates_df.columns if c not in non_cluster_cols]
+
+        # Use correlation to filter out low-corr clusters
+        cluster_cols_filtered = []
+        for clus in cluster_cols:
+            # Convert cluster col name to int if needed; or if col is int already, just use clus
+            # If your cluster columns are strings like '7', do int(clus).
+            # If they're already an integer type, just pass it directly.
+            try:
+                cluster_id = int(clus)
+            except ValueError:
+                cluster_id = clus  # fallback if you store them as strings
+
+            corr_val = correlations_dict.get(cluster_id, 0.0)
+            if abs(corr_val) >= corr_threshold:
+                cluster_cols_filtered.append(clus)
+
+        # If no clusters remain, skip this trial
+        if len(cluster_cols_filtered) == 0:
+            print(f"No clusters in trial '{trial_name}' meet corr_threshold={corr_threshold}. Skipping.")
+            continue
+
+        # 6) Compute ratio = firing_rate / avg_voltage for each sub-window, only for filtered clusters
+        ratio_df = firing_rates_df[['group'] + cluster_cols_filtered].copy()
+        for cluster in cluster_cols_filtered:
+            ratio_df[cluster] = ratio_df[cluster] / avg_voltage_df['avg_voltage']
+
+        # Convert to long format
+        ratio_long = ratio_df.melt(id_vars='group',
+                                   value_vars=cluster_cols_filtered,
+                                   var_name='cluster',
+                                   value_name='ratio')
+
+        # Compute average ratio per (cluster, group)
+        ratio_summary = ratio_long.groupby(['cluster', 'group'])['ratio'].mean().unstack('group')
+
+        # Ensure 'pre-stim' and 'post-stim' columns exist
+        for grp in ['pre-stim', 'post-stim']:
+            if grp not in ratio_summary.columns:
+                ratio_summary[grp] = np.nan
+
+        # 7) Add the (pre_stim, post_stim, freq_hz) points for each cluster
+        for cluster_id, row in ratio_summary.iterrows():
+            pre_stim_val = row['pre-stim']
+            post_stim_val = row['post-stim']
+            if pd.notna(pre_stim_val) and pd.notna(post_stim_val):
+                all_points.append((pre_stim_val, post_stim_val, freq_hz))
+
+    # 8) Create a single scatter plot if we have data
+    if len(all_points) == 0:
+        print("No valid data points to plot after correlation filtering.")
+        return
+
+    all_points_df = pd.DataFrame(all_points, columns=['pre_stim', 'post_stim', 'freq_hz'])
+
+    # For robust usage, ensure freq_hz is numeric or skip invalid
+    all_points_df['freq_hz'] = pd.to_numeric(all_points_df['freq_hz'], errors='coerce')
+    all_points_df = all_points_df.dropna(subset=['freq_hz'])
+
+    unique_freqs = np.unique(all_points_df['freq_hz'])
+
+    plt.figure(figsize=(8, 6))
+    cmap = plt.get_cmap('tab10')
+    freq_to_color = {}
+
+    for i, f in enumerate(unique_freqs):
+        freq_to_color[f] = cmap(i % 10)
+
+    # Plot all points by frequency
+    for f in unique_freqs:
+        freq_points = all_points_df[all_points_df['freq_hz'] == f]
+
+        # Scatter plot for these points
+        plt.scatter(freq_points['pre_stim'], freq_points['post_stim'],
+                    color=freq_to_color[f], alpha=0.7, label=f'{f} Hz')
+
+        # Compute a trendline with intercept fixed at 0
+        if len(freq_points) > 1:
+            slope = (freq_points['pre_stim'] * freq_points['post_stim']).sum() / (freq_points['pre_stim'] ** 2).sum()
+            xvals = np.linspace(freq_points['pre_stim'].min(), freq_points['pre_stim'].max(), 100)
+            yvals = slope * xvals
+            plt.plot(xvals, yvals, color=freq_to_color[f], linestyle='-', linewidth=2, alpha=0.7)
+
+    # Add a y=x line for reference
+    all_vals = np.concatenate([all_points_df['pre_stim'].dropna(),
+                               all_points_df['post_stim'].dropna()])
+    if len(all_vals) > 0:
+        min_val, max_val = np.nanmin(all_vals), np.nanmax(all_vals)
+        plt.plot([min_val, max_val], [min_val, max_val], 'k--', label='y = x (no change)')
+
+    plt.xlabel('Pre-Stim Avg Ratio (firing_rate / voltage)')
+    plt.ylabel('Post-Stim Avg Ratio (firing_rate / voltage)')
+    plt.title(f'Pre vs. Post Stim Ratio: All Trials | corr_threshold={corr_threshold}')
+    plt.grid(True, linestyle='--', alpha=0.5)
+    plt.legend(title='Stim Frequency')
+    plt.tight_layout()
+    plt.show()
 
 # can I get rid of this?
 def plot_von_frey_raster_and_trace(von_frey_analysis_instance, trial_name, title=None):
@@ -555,4 +729,95 @@ def plot_vf_spike_raster_filtered_units(von_frey_analysis_instance, trial_name, 
     ax_bottom.set_xlim([time_vector[0], time_vector[-1]])
 
     plt.tight_layout()
+    plt.show()
+
+def plot_inv_isi_vs_von_frey_all_clusters(von_frey_data: np.ndarray, 
+                                         inv_isi_traces: dict, 
+                                         correlations: dict, 
+                                         trial_name: str, 
+                                        #  save_path: str = None, 
+                                         title: str = None):
+    """
+    Plots inverse-ISI traces vs. Von Frey data for all clusters in a given trial.
+
+    Each cluster is plotted in its own subplot with the correlation coefficient included.
+
+    Parameters:
+    - von_frey_data (np.ndarray): The Von Frey voltage data array.
+    - inv_isi_traces (dict): Dictionary mapping cluster IDs to their inverse-ISI traces.
+    - correlations (dict): Dictionary mapping cluster IDs to their correlation coefficients.
+    - trial_name (str): The name of the trial for labeling purposes.
+    - save_path (str, optional): Path to save the figure. If None, the plot is not saved.
+    - title (str, optional): Title for the entire figure. If None, a default title is used.
+    """
+    num_clusters = len(inv_isi_traces)
+    if num_clusters == 0:
+        print(f"No clusters to plot for trial '{trial_name}'.")
+        return
+
+    # Define the number of columns for the subplot grid
+    ncols = 2
+    # Calculate the number of rows needed
+    nrows = ceil(num_clusters / ncols)
+
+    # Create subplots
+    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(15, 5 * nrows), sharex=True)
+
+    # If there's only one subplot, make axes a 2D array for consistency
+    if num_clusters == 1:
+        axes = [[axes]]
+    elif nrows == 1:
+        axes = [axes]
+
+    # Iterate over each cluster and plot
+    for idx, (cluster_id, inv_isi_trace) in enumerate(inv_isi_traces.items()):
+        row = idx // ncols
+        col = idx % ncols
+
+        ax_vf = axes[row][col]
+
+        # Plot Von Frey data
+        ax_vf.plot(von_frey_data, label='Von Frey', color='blue')
+        ax_vf.set_title(f'Cluster {cluster_id} | Corr: {correlations.get(cluster_id, 0.0):.3f}')
+        ax_vf.legend(loc='upper left')
+        ax_vf.set_ylabel('Von Frey (uV)')
+
+        # Plot inverse-ISI trace on a twin y-axis
+        ax_inv_isi = ax_vf.twinx()
+        ax_inv_isi.plot(inv_isi_trace, color='orange', label='Inv-ISI')
+        ax_inv_isi.set_ylabel('Inv-ISI')
+        ax_inv_isi.legend(loc='upper right')
+
+    # Hide any unused subplots
+    total_subplots = nrows * ncols
+    if num_clusters < total_subplots:
+        for empty_idx in range(num_clusters, total_subplots):
+            row = empty_idx // ncols
+            col = empty_idx % ncols
+            fig.delaxes(axes[row][col])
+
+    # Set common x-label
+    plt.xlabel('Samples')
+
+    # Set the figure title
+    if title:
+        fig.suptitle(title, fontsize=16)
+    else:
+        fig.suptitle(f'Inverse-ISI vs. Von Frey Data for Trial {trial_name}', fontsize=16)
+
+    # Adjust layout to prevent overlap
+    plt.tight_layout()
+
+    # If a title is set, adjust the top to accommodate it
+    if title or not title:
+        plt.subplots_adjust(top=0.95)
+
+    # # Save the figure if a save path is provided
+    # if save_path:
+    #     # Ensure the directory exists
+    #     Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+    #     plt.savefig(save_path, dpi=300)
+    #     print(f"Plot saved to {save_path}")
+
+    # Display the plot
     plt.show()
