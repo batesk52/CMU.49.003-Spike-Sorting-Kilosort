@@ -135,7 +135,46 @@ class VonFreyAnalysis:
         adjusted_start_times = np.clip(adjusted_start_times, 0, (num_samples - 1) / sampling_rate)
         adjusted_end_times = np.clip(adjusted_end_times, 0, (num_samples - 1) / sampling_rate)
 
-        # Plot and save
+        # new part: create a raster plot for each trial & save
+        if trial_name in self.spikes.kilosort_results:
+            ks_data = self.spikes.kilosort_results[trial_name]
+            fs = ks_data['ops']['fs']
+            spike_times_sec = ks_data['spike_times'] / fs
+            clusters = ks_data['spike_clusters']
+            
+            unique_clusters = np.unique(clusters)
+            cluster_order = {c: i for i, c in enumerate(unique_clusters)}
+            
+            fig, ax = plt.subplots(figsize=(10, 5))
+            # Plot spikes for each cluster as tick marks
+            for c in unique_clusters:
+                idx = clusters == c
+                ax.scatter(spike_times_sec[idx], np.full(np.sum(idx), cluster_order[c]),
+                        marker='|', color='black', s=100)
+            # Overlay the stimulus windows
+            for i, (start, end) in enumerate(zip(adjusted_start_times, adjusted_end_times)):
+                ax.axvspan(start, end, color='orange', alpha=0.3,
+                        label='Von Frey Stimulus' if i == 0 else None)
+            
+            ax.set_xlabel('Time (s)')
+            ax.set_ylabel('Cluster')
+            ax.set_yticks(list(cluster_order.values()))
+            ax.set_yticklabels(list(cluster_order.keys()))
+            ax.set_title(f'Raster Plot: {trial_name}')
+            
+            # Remove duplicate legend entries
+            handles, labels = ax.get_legend_handles_labels()
+            unique = dict(zip(labels, handles))
+            ax.legend(unique.values(), unique.keys())
+            
+            # Save the figure
+            figures_dir = Path(self.spikes.SAVE_DIRECTORY) / 'figures'
+            figures_dir.mkdir(parents=True, exist_ok=True)
+            fig.savefig(figures_dir / f'Raster_{trial_name}.png', dpi=300)
+            plt.close(fig)
+
+
+        # Plot the von frey trace and save
         fig, ax = plt.subplots(figsize=(10, 5))
         ax.plot(time_vector, von_frey_data, label='Von Frey Data', color='blue')
         for start, end in zip(adjusted_start_times, adjusted_end_times):
