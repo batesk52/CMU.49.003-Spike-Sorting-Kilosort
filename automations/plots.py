@@ -358,6 +358,9 @@ def vf_all_trials_combined_plot(combined_results, combined_qst_notes, corr_thres
 
     # Create a dictionary mapping Trial_ID to Freq. (Hz)
     freq_dict = dict(zip(combined_qst_notes['Trial_ID'], combined_qst_notes['Freq. (Hz)']))
+    # Create a dictionary mapping current amplitude to amp
+    amp_dict = dict(zip(combined_qst_notes['Trial_ID'], combined_qst_notes['amp']))
+
 
     all_points = []
     # Loop over each trial result in the combined_results dictionary.
