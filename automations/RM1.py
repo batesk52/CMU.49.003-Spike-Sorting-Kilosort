@@ -27,10 +27,16 @@ import pandas as pd
 import numpy as np
 from kilosort import io
 from kilosort import run_kilosort, DEFAULT_SETTINGS
+from kilosort.io import load_ops
 import matplotlib.pyplot as plt
 from matplotlib import gridspec, rcParams
 from spikeinterface import concatenate_recordings
 from kilosort.run_kilosort import load_sorting
+from kilosort.data_tools import (
+    mean_waveform, cluster_templates, get_good_cluster, get_cluster_spikes,
+    get_spike_waveforms, get_best_channel
+    )
+
 import shutil
 import spikeinterface.preprocessing as spre
 
@@ -409,6 +415,196 @@ class Kilosort_wrapper:
                 print(f"Error loading Kilosort outputs for trial {trial_folder.name}: {trial_error}")
                 continue
 
+    def plot_trial_results(self, trial_names):
+        """
+        Accepts a list of trial names (or a single trial name as a string) and iteratively
+        creates summary and waveform plots for each trial.
+        """
+        # Allow a single trial name to be passed as a string.
+        if not isinstance(trial_names, list):
+            trial_names = [trial_names]
+        
+        for trial_name in trial_names:
+            results_dir = self.SAVE_DIRECTORY / 'binary' / trial_name / 'kilosort4'
+            if not results_dir.exists():
+                print(f"Results directory not found for trial: {trial_name}")
+                continue
+
+            # Load kilosort outputs
+            ops = np.load(results_dir / 'ops.npy', allow_pickle=True).item()
+            camps = pd.read_csv(results_dir / 'cluster_Amplitude.tsv', sep='\t')['Amplitude'].values
+            contam_pct = pd.read_csv(results_dir / 'cluster_ContamPct.tsv', sep='\t')['ContamPct'].values
+            chan_map = np.load(results_dir / 'channel_map.npy')
+            templates = np.load(results_dir / 'templates.npy')
+            # Determine best channel from template energy
+            chan_best_idx = (templates**2).sum(axis=1).argmax(axis=-1)
+            chan_best = chan_map[chan_best_idx]
+            amplitudes = np.load(results_dir / 'amplitudes.npy')
+            st = np.load(results_dir / 'spike_times.npy')
+            clu = np.load(results_dir / 'spike_clusters.npy')
+            firing_rates = np.unique(clu, return_counts=True)[1] * 30000 / st.max()
+            dshift = ops.get('dshift')
+            
+            # Configure matplotlib style
+            rcParams['axes.spines.top'] = False
+            rcParams['axes.spines.right'] = False
+            gray = 0.5 * np.ones(3)
+            
+            # Summary plots: 3x3 grid figure
+            fig = plt.figure(figsize=(10,10), dpi=100)
+            grid = gridspec.GridSpec(3, 3, figure=fig, hspace=0.5, wspace=0.5)
+            
+            # Drift plot
+            ax = fig.add_subplot(grid[0,0])
+            nbatches = ops.get('Nbatches')
+            if nbatches is None or dshift is None:
+                ax.text(0.5, 0.5, "(drift disabled)", horizontalalignment='center', 
+                        verticalalignment='center', transform=ax.transAxes)
+                ax.set_xlabel('time (sec.)')
+                ax.set_ylabel('drift (um)')
+            else:
+                ax.plot(np.arange(0, nbatches) * 2, dshift)
+                ax.set_xlabel('time (sec.)')
+                ax.set_ylabel('drift (um)')
+            
+            # Spike scatter for first 5 sec.
+            ax = fig.add_subplot(grid[0,1:])
+            t1 = np.nonzero(st > ops['fs'] * 5)[0][0]
+            ax.scatter(st[:t1] / 30000., chan_best[clu[:t1]], s=0.5, color='k', alpha=0.25)
+            ax.set_xlim([0, 5])
+            ax.set_ylim([chan_map.max(), 0])
+            ax.set_xlabel('time (sec.)')
+            ax.set_ylabel('channel')
+            ax.set_title('spikes from units')
+            
+            # Histogram: firing rates
+            ax = fig.add_subplot(grid[1,0])
+            ax.hist(firing_rates, 20, color=gray)
+            ax.set_xlabel('firing rate (Hz)')
+            ax.set_ylabel('# of units')
+            
+            # Histogram: amplitude
+            ax = fig.add_subplot(grid[1,1])
+            ax.hist(camps, 20, color=gray)
+            ax.set_xlabel('amplitude')
+            ax.set_ylabel('# of units')
+            
+            # Histogram: contamination percentage
+            ax = fig.add_subplot(grid[1,2])
+            nb = ax.hist(np.minimum(100, contam_pct), np.arange(0,105,5), color=gray)
+            ax.plot([10, 10], [0, nb[0].max()], 'k--')
+            ax.set_xlabel('% contamination')
+            ax.set_ylabel('# of units')
+            ax.set_title('< 10% = good units')
+            
+            # Scatter plots: firing rate vs. amplitude (linear and log scales)
+            for k in range(2):
+                ax = fig.add_subplot(grid[2,k])
+                is_good = contam_pct < 10.
+                ax.scatter(firing_rates[~is_good], camps[~is_good], s=3, color='r', label='mua', alpha=0.25)
+                ax.scatter(firing_rates[is_good], camps[is_good], s=3, color='b', label='good', alpha=0.25)
+                ax.set_xlabel('firing rate (Hz)')
+                ax.set_ylabel('amplitude (a.u.)')
+                ax.legend()
+                if k == 1:
+                    ax.set_xscale('log')
+                    ax.set_yscale('log')
+                    ax.set_title('loglog')
+            plt.show()
+            
+            # Waveform plots for good and mua units
+            probe = ops['probe']
+            xc, yc = probe['xc'], probe['yc']
+            nc = 16  # channels to show around best channel
+            groups = [('good', np.nonzero(contam_pct <= 0.1)[0]),
+                    ('mua', np.nonzero(contam_pct > 0.1)[0])]
+            
+            for label, units in groups:
+                print(f'Plotting {label} units for trial: {trial_name}')
+                if len(units) == 0:
+                    # Create a figure with a message if no units are available
+                    fig = plt.figure(figsize=(6,2), dpi=150)
+                    ax = fig.add_subplot(111)
+                    ax.text(0.5, 0.5, f'No {label} units found', 
+                            horizontalalignment='center', verticalalignment='center', transform=ax.transAxes)
+                    ax.axis('off')
+                    plt.show()
+                    continue
+
+                fig = plt.figure(figsize=(12,3), dpi=150)
+                grid = gridspec.GridSpec(2, 20, figure=fig, hspace=0.25, wspace=0.5)
+                
+                for k in range(40):
+                    unit = units[np.random.randint(len(units))]
+                    wv = templates[unit].copy()  # waveform for this unit
+                    best_chan = chan_best[unit]
+                    spike_count = (clu == unit).sum()
+                    
+                    ax = fig.add_subplot(grid[k//20, k % 20])
+                    n_chan = wv.shape[-1]
+                    ic0 = max(0, best_chan - nc//2)
+                    ic1 = min(n_chan, best_chan + nc//2)
+                    wv_crop = wv[:, ic0:ic1]
+                    x0, y0 = xc[ic0:ic1], yc[ic0:ic1]
+                    amp = 4
+                    for ii, (xi, yi) in enumerate(zip(x0, y0)):
+                        t = np.arange(-wv_crop.shape[0]//2, wv_crop.shape[0]//2, dtype='float32')
+                        t /= wv_crop.shape[0] / 20
+                        ax.plot(xi + t, yi + wv_crop[:,ii]*amp, lw=0.5, color='k')
+                    ax.set_title(f'{spike_count}', fontsize='small')
+                    ax.axis('off')
+                plt.show()
+
+    def plot_cluster_waveforms(self, trial_names):
+        """
+        Accepts a list of trial names (or a single trial name as a string) and iteratively
+        generates a plot of the characteristic waveform for every "good" cluster in each trial.
+        """
+        # Allow a single trial name to be passed as a string.
+        if not isinstance(trial_names, list):
+            trial_names = [trial_names]
+        
+        for trial_name in trial_names:
+            results_dir = self.SAVE_DIRECTORY / 'binary' / trial_name / 'kilosort4'
+            if not results_dir.exists():
+                print(f"Results directory not found for trial: {trial_name}")
+                continue
+            
+            # Load ops to get parameters for time axis
+            ops = load_ops(results_dir / 'ops.npy')
+            # Compute time axis in milliseconds
+            t = (np.arange(ops['nt']) / ops['fs']) * 1000
+            
+            # Load custom cluster labels from TSV file
+            cluster_file = results_dir / 'cluster_KSLabel.tsv'
+            if not cluster_file.exists():
+                print(f"Cluster label file not found for trial: {trial_name}")
+                continue
+            df_labels = pd.read_csv(cluster_file, sep='\t')
+            # Select clusters marked as "good"
+            good_clusters = df_labels[df_labels["KSLabel"].str.lower() == "good"]["cluster_id"].tolist()
+            if len(good_clusters) == 0:
+                print(f"No good clusters found for trial: {trial_name}")
+                continue
+            
+            print(f"Plotting waveforms for trial {trial_name}: Good clusters found: {good_clusters}")
+            
+            # For each good cluster, generate a plot of its mean waveform and template.
+            for cluster_id in good_clusters:
+                try:
+                    mean_wv = mean_waveform(cluster_id, results_dir, n_spikes=100, bfile=None, best=True)
+                    mean_temp = cluster_templates(cluster_id, results_dir, mean=True, best=True)
+                except Exception as e:
+                    print(f"Error generating waveform for cluster {cluster_id} in trial {trial_name}: {e}")
+                    continue
+                
+                fig, ax = plt.subplots(figsize=(6,4), dpi=100)
+                ax.plot(t, mean_wv, c='black', linestyle='dashed', linewidth=2, label='100 spike mean waveform')
+                ax.plot(t, mean_temp, linewidth=1, label='kilosort cluster template')
+                ax.set_title(f"Trial {trial_name}: Cluster {cluster_id}")
+                ax.set_xlabel("Time (ms)")
+                ax.legend()
+                plt.show()
 
 
 class RatGroup:
