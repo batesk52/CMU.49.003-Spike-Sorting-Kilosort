@@ -367,7 +367,6 @@ class Kilosort_wrapper:
                     'firing_rates': firing_rates,
                     'dshift': dshift
                 }
-                # (Optional) Plotting code can be added here if desired.
             except Exception as e:
                 print(f"Error processing folder {folder.name}: {e}")
                 continue
@@ -570,6 +569,11 @@ class Kilosort_wrapper:
         Accepts a list of trial names (or a single trial name as a string) and iteratively
         creates summary and waveform plots for each trial.
         """
+
+        # Define the main figures directory (which is at the same level as "binary" and "tables")
+        figures_dir = self.SAVE_DIRECTORY / "figures"
+        figures_dir.mkdir(parents=True, exist_ok=True)
+
         # Allow a single trial name to be passed as a string.
         if not isinstance(trial_names, list):
             trial_names = [trial_names]
@@ -660,7 +664,14 @@ class Kilosort_wrapper:
                     ax.set_xscale('log')
                     ax.set_yscale('log')
                     ax.set_title('loglog')
+        
+            # Save the figure to the main figures folder with the desired filename
+            save_path = figures_dir / f"{trial_name}_summmary_plots.png"
+            fig.savefig(save_path, dpi=100, bbox_inches="tight")
+            print(f"Saved plot for trial {trial_name}, at {save_path}")
+            
             plt.show()
+
             
             # Waveform plots for good and mua units
             probe = ops['probe']
@@ -714,6 +725,12 @@ class Kilosort_wrapper:
                         ax.plot(xi + t, yi + waveform * amp, lw=0.5, color='k')
                     ax.set_title(f'{spike_count}', fontsize='small')
                     ax.axis('off')
+
+                # Save the figure to the main figures folder with the desired filename
+                save_path = figures_dir / f"{trial_name}_{label}_waveforms_on_probe.png"
+                fig.savefig(save_path, dpi=100, bbox_inches="tight")
+                print(f"Saved plot for trial {trial_name}, at {save_path}")
+
                 plt.show()
 
 
