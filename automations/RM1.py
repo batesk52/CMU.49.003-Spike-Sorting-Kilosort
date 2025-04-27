@@ -346,8 +346,10 @@ class Kilosort_wrapper:
                     settings = {'data_dir': str(self.SAVE_DIRECTORY / 'binary' / folder.name), 'n_chan_bin': 32}
                 elif new_settings == "vf_settings":
                     settings = {'data_dir': str(self.SAVE_DIRECTORY / 'binary' / folder.name), 'n_chan_bin': 32, 'nblocks': 0, "batch_size": 1500000}
-                elif new_settings == "vf_settings_flex_probe": # kilosort docs: "nblocks=5 can be a good choice for single-shank Neuropixels probes"
+                elif new_settings == "vf_settings_flex_probe": # kilosort docs: "for < 32 channels, drift correction will be inaccurate, so disable with n=0"
                     settings = {'data_dir': str(self.SAVE_DIRECTORY / 'binary' / folder.name), 'n_chan_bin': 32, 'nblocks': 5, "batch_size": 1500000}
+                elif new_settings == "70s batch, flex": # kilosort docs: "nblocks=5 can be a good choice for single-shank Neuropixels probes"
+                    settings = {'data_dir': str(self.SAVE_DIRECTORY / 'binary' / folder.name), 'n_chan_bin': 32, 'nblocks': 5, "batch_size": 2100000}
                 ops, st, clu, tF, Wall, similar_templates, is_ref, est_contam_rate, kept_spikes = run_kilosort(
                     settings=settings, probe_name=str(self.PROBE_DIRECTORY)
                 )
