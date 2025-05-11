@@ -611,3 +611,76 @@ def plot_inv_isi_vs_von_frey_all_clusters(von_frey_data: np.ndarray,
     plt.tight_layout()
     plt.subplots_adjust(top=0.95)
     plt.show()
+
+# =============================================================================
+# Modular Spike Data Plotting Functions
+# =============================================================================
+
+def plot_raster(spike_times, clusters, cluster_ids=None, fs=30000, ax=None, title=None):
+    """
+    Plot a raster of spike times for given clusters. spike_times and clusters should be 1D arrays of same length.
+    cluster_ids: list/array of clusters to plot (default: all unique in clusters)
+    fs: sampling rate (Hz) for converting spike_times if needed
+    ax: matplotlib axis to plot on (optional)
+    """
+    import matplotlib.pyplot as plt
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(12, 6))
+    if cluster_ids is None:
+        cluster_ids = np.unique(clusters)
+    cluster_to_y = {c: i for i, c in enumerate(cluster_ids)}
+    
+    # Plot spikes
+    for c in cluster_ids:
+        idx = clusters == c
+        ax.scatter(spike_times[idx], np.full(np.sum(idx), cluster_to_y[c]), 
+                  marker='|', s=100, label=f'Cluster {c}')
+    
+    # Customize axis labels and ticks
+    ax.set_xlabel('Time (s)')
+    ax.set_ylabel('Cluster')
+    ax.set_yticks(list(cluster_to_y.values()))
+    ax.set_yticklabels(list(cluster_to_y.keys()))
+    
+    # Set title
+    if title is not None:
+        ax.set_title(title)
+    else:
+        ax.set_title('Spike Raster')
+        
+    # Customize legend
+    if len(cluster_ids) > 10:
+        # For many clusters, place legend outside
+        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', 
+                 borderaxespad=0., ncol=max(1, len(cluster_ids)//20))
+    else:
+        # For fewer clusters, keep legend inside
+        ax.legend(loc='upper right')
+        
+    plt.tight_layout()
+    plt.show()
+
+def plot_waveform(waveform, t=None, ax=None, title=None):
+    """
+    Plot a single mean waveform (1D or 2D array). t is time axis (optional).
+    """
+    import matplotlib.pyplot as plt
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(6, 4))
+    if waveform is None:
+        print('No waveform to plot.')
+        return
+    if waveform.ndim == 1:
+        ax.plot(t if t is not None else np.arange(len(waveform)), waveform, label='Mean Waveform')
+    else:
+        for i in range(waveform.shape[1]):
+            ax.plot(t if t is not None else np.arange(waveform.shape[0]), waveform[:, i], label=f'Ch {i}')
+    ax.set_xlabel('Time (samples)' if t is None else 'Time (ms)')
+    ax.set_ylabel('Amplitude (a.u.)')
+    if title is not None:
+        ax.set_title(title)
+    else:
+        ax.set_title('Mean Waveform')
+    ax.legend()
+    plt.tight_layout()
+    plt.show()

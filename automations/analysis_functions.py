@@ -301,7 +301,7 @@ class VonFreyAnalysis:
     def compute_unit_firing_rates_for_subwindows(self, trial_name, subwindow_start_times, subwindow_end_times):
         """
         Compute firing rates for every cluster during each sub-window in a trial.
-        This version uses vectorized np.searchsorted to quickly count spikes per sub-window.
+        This version uses vectorized np.searchsorted to quickly count spikes per subwindow.
         """
         if trial_name not in self.spikes.kilosort_results:
             print(f"No kilosort results for trial '{trial_name}'.")
@@ -325,6 +325,20 @@ class VonFreyAnalysis:
             counts = np.searchsorted(spikes_cluster, subwindow_end_times) - np.searchsorted(spikes_cluster, subwindow_start_times)
             firing_rates[cluster] = counts / durations
         
+        firing_rates_df = pd.DataFrame(firing_rates).fillna(0)
+        return firing_rates_df
+
+    def compute_unit_firing_rates_for_subwindows_modular(self, spike_times_sec, clusters, subwindow_start_times, subwindow_end_times):
+        """
+        Modular version: Compute firing rates for every cluster during each sub-window, given spike_times (in sec) and clusters.
+        """
+        unique_clusters = np.unique(clusters)
+        durations = subwindow_end_times - subwindow_start_times
+        firing_rates = {}
+        for cluster in unique_clusters:
+            spikes_cluster = spike_times_sec[clusters == cluster]
+            counts = np.searchsorted(spikes_cluster, subwindow_end_times) - np.searchsorted(spikes_cluster, subwindow_start_times)
+            firing_rates[cluster] = counts / durations
         firing_rates_df = pd.DataFrame(firing_rates).fillna(0)
         return firing_rates_df
 

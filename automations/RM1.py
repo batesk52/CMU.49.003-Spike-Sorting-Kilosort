@@ -11,7 +11,7 @@ Improved Exception Handling and Use of Pathlib:
 File/directory operations are now handled via pathlib where possible, and try/except blocks now report the encountered exceptions.
 
 Meta Class for Multiple Rats:
-A new class, RatGroup, aggregates multiple Rat objects, allowing you to run preprocessing across all rats and create wrappers for SpikeInterface and Kilosort. This class also stores each rat’s ID (which will be useful for subsequent mixed-model analyses).
+A new class, RatGroup, aggregates multiple Rat objects, allowing you to run preprocessing across all rats and create wrappers for SpikeInterface and Kilosort. This class also stores each rat's ID (which will be useful for subsequent mixed-model analyses).
 
 Minor Simplifications in the Wrappers:
 The wrappers (both SpikeInterface and Kilosort) have been slightly streamlined (for example, using Path objects for directories).
@@ -36,7 +36,6 @@ from kilosort.data_tools import (
     mean_waveform, cluster_templates, get_good_cluster, get_cluster_spikes,
     get_spike_waveforms, get_best_channel
     )
-
 import shutil
 import spikeinterface.preprocessing as spre
 
@@ -79,7 +78,7 @@ class Rat:
         Parameters:
         si_wrapper: The SpikeInterface_wrapper for this rat.
         ks_wrapper: The Kilosort_wrapper for this rat.
-        excel_parent_folder: str or Path; the parent folder under which each rat’s results
+        excel_parent_folder: str or Path; the parent folder under which each rat's results
                             (in a subfolder named by RatID with a "tables" folder) might exist.
         kwargs: additional parameters for the analysis (e.g., subwindow_width, corr_threshold).
         
@@ -664,6 +663,41 @@ class Kilosort_wrapper:
                 # Display the figure
                 plt.show()
 
+    def get_clusters(self, trial_name):
+        """
+        Return a sorted array of unique cluster IDs for a given trial.
+        """
+        if trial_name not in self.kilosort_results:
+            print(f"Trial '{trial_name}' not found in kilosort_results.")
+            return np.array([])
+        return np.unique(self.kilosort_results[trial_name]['spike_clusters'])
+
+    def get_spike_times(self, trial_name, cluster_id=None):
+        """
+        Return spike times (in seconds) for a given trial. If cluster_id is specified, return only for that cluster.
+        """
+        if trial_name not in self.kilosort_results:
+            print(f"Trial '{trial_name}' not found in kilosort_results.")
+            return np.array([])
+        st = self.kilosort_results[trial_name]['spike_times']
+        clu = self.kilosort_results[trial_name]['spike_clusters']
+        fs = self.kilosort_results[trial_name]['ops']['fs']
+        if cluster_id is None:
+            return st / fs
+        else:
+            return st[clu == cluster_id] / fs
+
+    def get_waveform(self, trial_name, cluster_id, n_spikes=100):
+        """
+        Return the mean waveform for a given cluster in a trial. Uses mean_waveform from kilosort.data_tools.
+        """
+        results_dir = self.SAVE_DIRECTORY / 'binary' / trial_name / 'kilosort4'
+        try:
+            wv = mean_waveform(cluster_id, results_dir, n_spikes=n_spikes, bfile=None, best=True)
+            return wv
+        except Exception as e:
+            print(f"Error extracting waveform for cluster {cluster_id} in trial {trial_name}: {e}")
+            return None
 
 
 class RatGroup:
@@ -721,4 +755,42 @@ class RatGroup:
             rat_folder.mkdir(parents=True, exist_ok=True)
             self.ks_wrappers[rat_id] = Kilosort_wrapper(str(rat_folder), probe_directory)
         return self.ks_wrappers
+
+    # === Modular Data Access Methods ===
+    def get_spike_times(self, trial_name, cluster_id=None):
+        """
+        Return spike times (in seconds) for a given trial. If cluster_id is specified, return only for that cluster.
+        """
+        if trial_name not in self.ks_wrappers:
+            print(f"Trial '{trial_name}' not found in kilosort_wrappers.")
+            return np.array([])
+        ks = self.ks_wrappers[trial_name]
+        st = ks.kilosort_results[trial_name]['spike_times']
+        clu = ks.kilosort_results[trial_name]['spike_clusters']
+        fs = ks.kilosort_results[trial_name]['ops']['fs']
+        if cluster_id is None:
+            return st / fs
+        else:
+            return st[clu == cluster_id] / fs
+
+    def get_clusters(self, trial_name):
+        """
+        Return a sorted array of unique cluster IDs for a given trial.
+        """
+        if trial_name not in self.ks_wrappers:
+            print(f"Trial '{trial_name}' not found in kilosort_wrappers.")
+            return np.array([])
+        return np.unique(self.ks_wrappers[trial_name].kilosort_results[trial_name]['spike_clusters'])
+
+    def get_waveform(self, trial_name, cluster_id, n_spikes=100):
+        """
+        Return the mean waveform for a given cluster in a trial. Uses mean_waveform from kilosort.data_tools.
+        """
+        results_dir = self.SAVE_DIRECTORY / 'binary' / trial_name / 'kilosort4'
+        try:
+            wv = mean_waveform(cluster_id, results_dir, n_spikes=n_spikes, bfile=None, best=True)
+            return wv
+        except Exception as e:
+            print(f"Error extracting waveform for cluster {cluster_id} in trial {trial_name}: {e}")
+            return None
  
