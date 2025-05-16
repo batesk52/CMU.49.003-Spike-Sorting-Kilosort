@@ -533,30 +533,23 @@ def plot_vf_spike_raster_filtered_units(von_frey_analysis_instance, trial_name, 
     vf_data = recording.get_traces(channel_ids=['ANALOG-IN-2'], return_scaled=True).flatten()
     time_vector = np.arange(len(vf_data)) / sampling_rate_vf
     unique_clusters = np.unique(clu)
-    # Compute correlation per cluster via a simple approach (see your inverse-ISI method)
-    cluster_correlations = {}
-    for cluster in unique_clusters:
-        spikes_c = np.sort(spike_times_sec[clu == cluster])
-        if len(spikes_c) < 2:
-            cluster_correlations[cluster] = 0
-            continue
-        time_since_last = np.zeros(len(vf_data))
-        last_idx = 0
-        spike_idx = 0
-        for i, t in enumerate(time_vector):
-            while spike_idx < len(spikes_c) and spikes_c[spike_idx] <= t:
-                last_idx = spike_idx
-                spike_idx += 1
-            time_since_last[i] = t - spikes_c[last_idx]
-        corr = 0 if np.std(time_since_last)==0 or np.std(vf_data)==0 else np.corrcoef(time_since_last, vf_data)[0,1]
-        cluster_correlations[cluster] = corr
-    filtered_clusters = [c for c in unique_clusters if abs(cluster_correlations.get(c, 0)) >= corr_threshold]
+
+    # Get correlations from the analysis instance
+    correlations, _ = von_frey_analysis_instance.compute_inv_isi_correlation(trial_name)
+    if not correlations:
+        print(f"No correlation data found for trial '{trial_name}'.")
+        return
+
+    # Filter clusters based on correlation threshold
+    filtered_clusters = [c for c in unique_clusters if abs(correlations.get(c, 0)) >= corr_threshold]
     if not filtered_clusters:
         print(f"No clusters meet the correlation threshold for trial '{trial_name}'.")
         return
+
     filtered_clusters_sorted = np.sort(filtered_clusters)
     cluster_to_y = {c: i for i, c in enumerate(filtered_clusters_sorted)}
     mask = np.isin(clu, filtered_clusters)
+
     fig, ax = plt.subplots(nrows=2, ncols=1, figsize=(10, 8), sharex=True)
     ax[0].plot(time_vector, vf_data, color='blue')
     ax[0].set_ylabel('Voltage (uV)')
@@ -634,7 +627,7 @@ def plot_raster(spike_times, clusters, cluster_ids=None, fs=30000, ax=None, titl
     for c in cluster_ids:
         idx = clusters == c
         ax.scatter(spike_times[idx], np.full(np.sum(idx), cluster_to_y[c]), 
-                  marker='|', s=100, label=f'Cluster {c}')
+                  marker='.', s=10, label=f'Cluster {c}')
     
     # Customize axis labels and ticks
     ax.set_xlabel('Time (s)')

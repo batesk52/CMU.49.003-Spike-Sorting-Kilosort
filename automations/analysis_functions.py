@@ -58,7 +58,11 @@ class MultiRatVonFreyAnalysis:
             si = self.si_wrappers[rat_id]
             ks = self.ks_wrappers[rat_id]
             # Automatically decide: if the Excel files exist in the proper subfolder, load them.
-            results = rat.get_von_frey_analysis(si, ks, excel_parent_folder=excel_parent_folder, **kwargs)
+            # Pass good_clusters_by_trial if present in kwargs (for per-rat customization)
+            rat_kwargs = dict(kwargs)
+            if 'good_clusters_by_trial' in kwargs:
+                rat_kwargs['good_clusters_by_trial'] = kwargs['good_clusters_by_trial'].get(rat_id, None)
+            results = rat.get_von_frey_analysis(si, ks, excel_parent_folder=excel_parent_folder, **rat_kwargs)
             if results is None:
                 continue
             for trial_name, res in results.items():
@@ -298,10 +302,11 @@ class VonFreyAnalysis:
                         for start, end in zip(subwindow_start_times, subwindow_end_times)]
         return pd.DataFrame({'avg_voltage': avg_voltages})
 
-    def compute_unit_firing_rates_for_subwindows(self, trial_name, subwindow_start_times, subwindow_end_times):
+    def compute_unit_firing_rates_for_subwindows(self, trial_name, subwindow_start_times, subwindow_end_times, good_clusters=None):
         """
         Compute firing rates for every cluster during each sub-window in a trial.
         This version uses vectorized np.searchsorted to quickly count spikes per subwindow.
+        If good_clusters is provided, only those clusters are included.
         """
         if trial_name not in self.spikes.kilosort_results:
             print(f"No kilosort results for trial '{trial_name}'.")
@@ -313,6 +318,8 @@ class VonFreyAnalysis:
         fs = kilosort_output['ops']['fs']
         spike_times_sec = st / fs
         unique_clusters = np.unique(clu)
+        if good_clusters is not None:
+            unique_clusters = [c for c in unique_clusters if c in good_clusters]
         n_windows = len(subwindow_start_times)
         
         # Initialize a dictionary to hold firing rates (counts divided by window duration)
@@ -342,9 +349,10 @@ class VonFreyAnalysis:
         firing_rates_df = pd.DataFrame(firing_rates).fillna(0)
         return firing_rates_df
 
-    def compute_inv_isi_correlation(self, trial_name, window_size=15000):
+    def compute_inv_isi_correlation(self, trial_name, window_size=15000, good_clusters=None):
         """s
         Compute the correlation between a smoothed inverse-ISI trace per cluster and the Von Frey signal.
+        If good_clusters is provided, only those clusters are included.
         """
         if trial_name not in self.spikes.kilosort_results:
             print(f"[WARNING] Kilosort results not found for trial: {trial_name}")
@@ -375,6 +383,8 @@ class VonFreyAnalysis:
                   f"max spike time = {max_spike_time}, length of VF data = {N}.")
 
         unique_clusters = np.unique(clu)
+        if good_clusters is not None:
+            unique_clusters = [c for c in unique_clusters if c in good_clusters]
         correlations = {}
         inv_isi_traces = {}
 
@@ -409,8 +419,81 @@ class VonFreyAnalysis:
         self.inv_isi_traces[trial_name] = inv_isi_traces
         return correlations, inv_isi_traces
 
+    def compute_inv_isi_correlation_modular(self, spike_times, clusters, fs, von_frey_data, window_size=15000):
+        """
+        Modular version: Compute the correlation between a smoothed inverse-ISI trace per cluster and the Von Frey signal.
+        Arguments:
+            spike_times: array-like, spike times (in samples or seconds; if samples, fs must be provided)
+            clusters: array-like, cluster assignments for each spike
+            fs: sampling rate (Hz)
+            von_frey_data: array-like, analog trace (should be same length as recording)
+            window_size: smoothing window size (in samples)
+        Returns:
+            correlations: dict of cluster_id -> correlation value
+            inv_isi_traces: dict of cluster_id -> smoothed inverse-ISI trace
+        """
+        # If spike_times are in samples, convert to integer indices
+        if np.max(spike_times) > 1000:  # crude check: likely in samples
+            spike_indices = spike_times.astype(int)
+        else:  # likely in seconds
+            spike_indices = (spike_times * fs).astype(int)
+        N = len(von_frey_data)
+        unique_clusters = np.unique(clusters)
+        correlations = {}
+        inv_isi_traces = {}
+        for cluster in unique_clusters:
+            cluster_spike_indices = np.sort(spike_indices[clusters == cluster])
+            inv_isi_trace = np.zeros(N, dtype=float)
+            if len(cluster_spike_indices) < 2:
+                correlations[cluster] = 0.0
+                inv_isi_traces[cluster] = inv_isi_trace
+                continue
+            for i in range(len(cluster_spike_indices) - 1):
+                s_k = cluster_spike_indices[i]
+                s_next = cluster_spike_indices[i + 1]
+                if s_k >= N:
+                    break
+                if s_next > N:
+                    s_next = N
+                isi = s_next - s_k
+                if isi == 0:
+                    isi = 1
+                inv_isi_trace[s_k:s_next] = 1.0 / isi
+            inv_isi_trace_smoothed = self._smooth_moving_average(inv_isi_trace, window_size=window_size)
+            std_inv = np.std(inv_isi_trace_smoothed)
+            std_vf = np.std(von_frey_data)
+            corr_val = 0.0 if std_inv == 0 or std_vf == 0 else np.corrcoef(inv_isi_trace_smoothed, von_frey_data)[0, 1]
+            correlations[cluster] = corr_val
+            inv_isi_traces[cluster] = inv_isi_trace_smoothed
+        # Store for later access
+        self.inv_isi_modular_results = {
+            'correlations': correlations,
+            'inv_isi_traces': inv_isi_traces
+        }
+        return correlations, inv_isi_traces
+
+    def plot_inv_isi_vs_von_frey(self, von_frey_data, inv_isi_traces, correlations, trial_name, cluster_id, title=None):
+        """
+        Plot the smoothed inverse-ISI trace and Von Frey signal for a given cluster.
+        """
+        import matplotlib.pyplot as plt
+        N = len(von_frey_data)
+        t = np.arange(N)
+        fig, ax1 = plt.subplots(figsize=(12, 5))
+        ax1.plot(t, von_frey_data, color='tab:blue', label='Von Frey Signal', alpha=0.7)
+        ax1.set_ylabel('Von Frey Voltage', color='tab:blue')
+        ax2 = ax1.twinx()
+        ax2.plot(t, inv_isi_traces[cluster_id], color='tab:red', label='Smoothed Inverse-ISI', alpha=0.7)
+        ax2.set_ylabel('Smoothed Inverse-ISI', color='tab:red')
+        ax1.set_xlabel('Sample Index')
+        plot_title = title if title is not None else f'Trial: {trial_name}, Cluster: {cluster_id}\nCorrelation: {correlations[cluster_id]:.3f}'
+        plt.title(plot_title)
+        fig.tight_layout()
+        fig.legend(loc='upper right', bbox_to_anchor=(0.9, 0.9))
+        plt.show()
+
     def analyze_subwindows(self, TRIAL_NAMES=None, amplitude_threshold=225000, start_buffer=0.001, 
-                           end_buffer=0.001, subwindow_width=0.5, corr_threshold=0.01):
+                           end_buffer=0.001, subwindow_width=0.5, corr_threshold=0.01, good_clusters_by_trial=None):
         """
         High-level analysis pipeline that:
           1. Extracts Von Frey windows.
@@ -437,13 +520,32 @@ class VonFreyAnalysis:
             subwindow_ends = subwindows_dict[trial_name]['subwindow_end_times']
 
             avg_voltage_df = self.compute_average_von_frey_voltage(trial_name, subwindow_starts, subwindow_ends)
-            firing_rates_df = self.compute_unit_firing_rates_for_subwindows(trial_name, subwindow_starts, subwindow_ends)
-
             groups = ["pre-stim" if start < 35 else "post-stim" for start in subwindow_starts]
-            avg_voltage_df['group'] = groups
-            firing_rates_df['group'] = groups
+            avg_voltage_df.insert(0, 'group', groups)
+            good_clusters = None
+            if good_clusters_by_trial is not None and trial_name in good_clusters_by_trial:
+                good_clusters = good_clusters_by_trial[trial_name]
+            firing_rates_df = self.compute_unit_firing_rates_for_subwindows(trial_name, subwindow_starts, subwindow_ends, good_clusters=good_clusters)
 
-            correlations, _ = self.compute_inv_isi_correlation(trial_name, window_size=15000)
+            # Ensure 'group' is the first column before saving
+            if 'group' not in firing_rates_df.columns:
+                firing_rates_df.insert(0, 'group', groups)
+            else:
+                # Move 'group' to the first column if it's not already
+                cols = ['group'] + [col for col in firing_rates_df.columns if col != 'group']
+                firing_rates_df = firing_rates_df[cols]
+
+            # Debug: print columns before saving
+            if list(firing_rates_df.columns) == ['group']:
+                print(f"[WARNING] Only 'group' column present in firing_rates_df for {trial_name}. No cluster columns will be saved!")
+            else:
+                if 'group' in firing_rates_df.columns:
+                    cluster_cols = firing_rates_df.columns.drop('group').tolist()
+                else:
+                    cluster_cols = firing_rates_df.columns.tolist()
+                print(f"[INFO] Cluster columns present: {cluster_cols}")
+
+            correlations, _ = self.compute_inv_isi_correlation(trial_name, window_size=15000, good_clusters=good_clusters)
             if correlations:
                 corr_row = pd.DataFrame({cluster: [corr_val] for cluster, corr_val in correlations.items()},
                                         index=['correlation'])
