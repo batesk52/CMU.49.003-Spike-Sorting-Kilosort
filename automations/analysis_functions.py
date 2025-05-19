@@ -124,105 +124,53 @@ class VonFreyAnalysis:
         return self.von_frey_time_windows
 
     def _extract_von_frey_windows_single_trial(self, trial_name, amplitude_threshold=225000, 
-                                               start_buffer=0.01, end_buffer=0.01):
+                                               start_buffer=0.01, end_buffer=0.01, custom_data=None, custom_sampling_rate=None):
         """
         Process a single trial to identify Von Frey windows.
-        Saves raster and waveform figures.
-        Returns a dictionary with 'adjusted_start_times' and 'adjusted_end_times' for the trial.
+        If custom_data and custom_sampling_rate are provided, use them instead of loading from the trial.
+        Returns a dictionary with 'adjusted_start_times' and 'adjusted_end_times' for the trial or segment.
         """
-        # Check for channel availability in stream3 recording
-        if trial_name not in self.rat.analog_data:
-            print(f"Trial '{trial_name}' not found in intan_recordings_stream3.")
-            return None
-
-        recording = self.rat.analog_data[trial_name]
-        sampling_rate = recording.get_sampling_frequency()
-        if 'ANALOG-IN-2' not in recording.get_channel_ids():
-            print(f"ANALOG-IN-2 channel not found in trial '{trial_name}'.")
-            return None
-
-        von_frey_data = recording.get_traces(channel_ids=['ANALOG-IN-2'], return_scaled=True).flatten()
-        num_samples = len(von_frey_data)
-        time_vector = np.arange(num_samples) / sampling_rate
-
+        # Use custom data if provided
+        if custom_data is not None and custom_sampling_rate is not None:
+            von_frey_data = custom_data
+            sampling_rate = custom_sampling_rate
+            num_samples = len(von_frey_data)
+            time_vector = np.arange(num_samples) / sampling_rate
+        else:
+            # Check for channel availability in stream3 recording
+            if trial_name not in self.rat.analog_data:
+                print(f"Trial '{trial_name}' not found in intan_recordings_stream3.")
+                return None
+            recording = self.rat.analog_data[trial_name]
+            sampling_rate = recording.get_sampling_frequency()
+            if 'ANALOG-IN-2' not in recording.get_channel_ids():
+                print(f"ANALOG-IN-2 channel not found in trial '{trial_name}'.")
+                return None
+            von_frey_data = recording.get_traces(channel_ids=['ANALOG-IN-2'], return_scaled=True).flatten()
+            num_samples = len(von_frey_data)
+            time_vector = np.arange(num_samples) / sampling_rate
         # Detect rising and falling edges based on amplitude threshold
         rising_edges = np.where((von_frey_data[:-1] < amplitude_threshold) & (von_frey_data[1:] >= amplitude_threshold))[0] + 1
         falling_edges = np.where((von_frey_data[:-1] >= amplitude_threshold) & (von_frey_data[1:] < amplitude_threshold))[0] + 1
-
         if von_frey_data[0] >= amplitude_threshold:
             rising_edges = np.insert(rising_edges, 0, 0)
         if von_frey_data[-1] >= amplitude_threshold:
             falling_edges = np.append(falling_edges, num_samples - 1)
-
         min_len = min(len(rising_edges), len(falling_edges))
         rising_edges = rising_edges[:min_len]
         falling_edges = falling_edges[:min_len]
-
         start_times = rising_edges / sampling_rate
         end_times = falling_edges / sampling_rate
-
         # Apply buffers
         adjusted_start_times = np.clip(start_times + start_buffer, 0, (num_samples - 1) / sampling_rate)
         adjusted_end_times = np.clip(end_times - end_buffer, 0, (num_samples - 1) / sampling_rate)
         valid = adjusted_start_times < adjusted_end_times
         adjusted_start_times = adjusted_start_times[valid]
         adjusted_end_times = adjusted_end_times[valid]
-
-        # Create and save a raster plot if Kilosort results exist for this trial
-        if trial_name in self.spikes.kilosort_results:
-            ks_data = self.spikes.kilosort_results[trial_name]
-            fs = ks_data['ops']['fs']
-            spike_times_sec = ks_data['spike_times'] / fs
-            clusters = ks_data['spike_clusters']
-            unique_clusters = np.unique(clusters)
-            cluster_order = {c: i for i, c in enumerate(unique_clusters)}
-            
-            fig, ax = plt.subplots(figsize=(10, 5))
-            for c in unique_clusters:
-                idx = clusters == c
-                ax.scatter(spike_times_sec[idx], np.full(np.sum(idx), cluster_order[c]),
-                           marker='|', color='black', s=100)
-            for i, (start, end) in enumerate(zip(adjusted_start_times, adjusted_end_times)):
-                ax.axvspan(start, end, color='orange', alpha=0.3, label='Von Frey Stimulus' if i == 0 else None)
-            ax.set_xlabel('Time (s)')
-            ax.set_ylabel('Cluster')
-            ax.set_yticks(list(cluster_order.values()))
-            ax.set_yticklabels(list(cluster_order.keys()))
-            ax.set_title(f'Raster Plot: {trial_name}')
-            handles, labels = ax.get_legend_handles_labels()
-            by_label = OrderedDict(zip(labels, handles))
-            ax.legend(dict(zip(labels, handles)).values(), dict(zip(labels, handles)).keys())
-            # by_label = OrderedDict(zip(labels, handles))
-            # ax.legend(by_label.values(), by_label.keys(), loc='upper right')
-            figures_dir = Path(self.spikes.SAVE_DIRECTORY) / 'figures'
-            figures_dir.mkdir(parents=True, exist_ok=True)
-            fig.savefig(figures_dir / f'Raster_{trial_name}.png', dpi=300)
-            plt.close(fig)
-
-        # Plot and save the Von Frey trace with stimulus windows
-        fig, ax = plt.subplots(figsize=(10, 5))
-        ax.plot(time_vector, von_frey_data, label='Von Frey Data', color='blue')
-        for start, end in zip(adjusted_start_times, adjusted_end_times):
-            ax.axvspan(start, end, color='orange', alpha=0.3, label='Von Frey Stimulus')
-        ax.set_xlabel('Time (s)')
-        ax.set_ylabel('Amplitude (uV)')
-        ax.set_title(f'Von Frey Windows: {trial_name}')
-        handles, labels = ax.get_legend_handles_labels()
-        by_label = OrderedDict(zip(labels, handles))
-        ax.legend(by_label.values(), by_label.keys(), loc='upper right')
-        # by_label = OrderedDict(zip(labels, handles))
-        # ax.legend(by_label.values(), by_label.keys())
-        fig.savefig(figures_dir / f'VF_window_{trial_name}.png', dpi=300)
-        plt.tight_layout()
-        plt.close(fig)
-
         intervals = {
             'adjusted_start_times': adjusted_start_times,
             'adjusted_end_times': adjusted_end_times
         }
-        tables_dir = Path(self.spikes.SAVE_DIRECTORY) / "tables"
-        tables_dir.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame(intervals).to_excel(tables_dir / f"{trial_name}_von_frey_time_windows.xlsx")
         return intervals
 
     # NOTE: This method is currently not used in analyze_subwindows.
@@ -427,7 +375,7 @@ class VonFreyAnalysis:
         self.inv_isi_traces[trial_name] = inv_isi_traces
         return correlations, inv_isi_traces
 
-    def compute_inv_isi_correlation_modular(self, spike_times, clusters, fs, von_frey_data, window_size=15000, time_window=None):
+    def compute_inv_isi_correlation_modular(self, spike_times, clusters, fs, von_frey_data, window_size=15000, time_window=None, vf_magnitude=225000):
         """
         Modular version: Compute the correlation between a smoothed inverse-ISI trace per cluster and the Von Frey signal.
         Uses causal smoothing for ISI trace.
@@ -505,24 +453,85 @@ class VonFreyAnalysis:
 
         return correlations, inv_isi_traces
 
-    def plot_inv_isi_vs_von_frey(self, von_frey_data, inv_isi_traces, correlations, trial_name, cluster_id, title=None):
+    def plot_inv_isi_vs_von_frey(self, von_frey_data, inv_isi_traces, correlations, trial_name, cluster_id, title=None, vf_magnitude=225000, custom_windows=None, mask_range=None, psth_responsive=None):
         """
         Plot the smoothed inverse-ISI trace and Von Frey signal for a given cluster.
+        Also highlight von Frey windows and show windowed correlation values.
+        If custom_windows is provided, use those windows for highlighting and windowed correlation calculation.
+        If mask_range=(start_idx, end_idx) is provided, mask (set to np.nan) the data outside this range before plotting.
+        If psth_responsive is provided (list/array, one per window), display both r and responsiveness above each window.
         """
         import matplotlib.pyplot as plt
+        import numpy as np
         N = len(von_frey_data)
         t = np.arange(N)
-        fig, ax1 = plt.subplots(figsize=(12, 5))
-        ax1.plot(t, von_frey_data, color='tab:blue', label='Von Frey Signal', alpha=0.7)
+        # Masking logic
+        vf_plot = np.copy(von_frey_data)
+        isi_plot = np.copy(inv_isi_traces[cluster_id])
+        if mask_range is not None:
+            start_idx, end_idx = mask_range
+            if start_idx > 0:
+                vf_plot[:start_idx] = np.nan
+                isi_plot[:start_idx] = np.nan
+            if end_idx < N:
+                vf_plot[end_idx:] = np.nan
+                isi_plot[end_idx:] = np.nan
+        fig, ax1 = plt.subplots(figsize=(16, 8))  # Make plot taller
+        ax1.plot(t, vf_plot, color='tab:blue', label='Von Frey Signal', alpha=0.7)
         ax1.set_ylabel('Von Frey Voltage', color='tab:blue')
         ax2 = ax1.twinx()
-        ax2.plot(t, inv_isi_traces[cluster_id], color='tab:red', label='Smoothed Inverse-ISI', alpha=0.7)
+        ax2.plot(t, isi_plot, color='tab:red', label='Smoothed Inverse-ISI', alpha=0.7)
         ax2.set_ylabel('Smoothed Inverse-ISI', color='tab:red')
         ax1.set_xlabel('Sample Index')
         plot_title = title if title is not None else f'Trial: {trial_name}, Cluster: {cluster_id}\nCorrelation: {correlations[cluster_id]:.3f}'
-        plt.title(plot_title)
+        plt.title(plot_title, pad=20)  # Add padding above the title
+        # --- Von Frey window highlighting and windowed correlation calculation ---
+        if custom_windows is not None:
+            intervals = custom_windows
+        elif hasattr(self, 'von_frey_time_windows') and trial_name in self.von_frey_time_windows:
+            intervals = self.von_frey_time_windows[trial_name]
+        else:
+            intervals = self._extract_von_frey_windows_single_trial(trial_name, amplitude_threshold=vf_magnitude, start_buffer=0.01, end_buffer=0.01)
+        start_times = intervals['adjusted_start_times']
+        end_times = intervals['adjusted_end_times']
+        fs = N / (t[-1] if t[-1] > 0 else 1)
+        if hasattr(self, 'spikes') and hasattr(self.spikes, 'kilosort_results') and trial_name in self.spikes.kilosort_results:
+            fs = self.spikes.kilosort_results[trial_name]['ops']['fs']
+        windowed_corrs = []
+        for i, (start, end) in enumerate(zip(start_times, end_times)):
+            start_idx_w = int(start * fs)
+            end_idx_w = int(end * fs)
+            if end_idx_w > N:
+                end_idx_w = N
+            if start_idx_w >= end_idx_w:
+                continue
+            isi_win = inv_isi_traces[cluster_id][start_idx_w:end_idx_w]
+            vf_win = von_frey_data[start_idx_w:end_idx_w]
+            std_isi = np.std(isi_win)
+            std_vf = np.std(vf_win)
+            if std_isi == 0 or std_vf == 0 or len(isi_win) < 2:
+                corr = np.nan
+            else:
+                corr = np.corrcoef(isi_win, vf_win)[0, 1]
+            windowed_corrs.append(corr)
+            ax1.axvspan(start_idx_w, end_idx_w, color='orange', alpha=0.2)
+            y_pos = np.nanmax(vf_plot) if np.any(~np.isnan(vf_plot)) else 0
+            # Display both r and PSTH responsiveness if provided
+            if psth_responsive is not None and i < len(psth_responsive):
+                resp_label = 'Responsive' if psth_responsive[i] else 'Not responsive'
+                text_str = f"r={corr:.2f} {resp_label}"
+                ax1.text((start_idx_w + end_idx_w) / 2, y_pos * 1.05, text_str, color='black', fontsize=14, ha='center', va='bottom')
+            else:
+                ax1.text((start_idx_w + end_idx_w) / 2, y_pos * 1.05, f"r={corr:.2f}", color='black', fontsize=12, ha='center', va='bottom')
+        if not hasattr(self, 'windowed_correlations'):
+            self.windowed_correlations = {}
+        if trial_name not in self.windowed_correlations:
+            self.windowed_correlations[trial_name] = {}
+        self.windowed_correlations[trial_name][cluster_id] = windowed_corrs
         fig.tight_layout()
-        fig.legend(loc='upper right', bbox_to_anchor=(0.9, 0.9))
+        # Move legend below the plot
+        fig.legend(loc='upper center', bbox_to_anchor=(0.5, -0.01), ncol=2)
+
         plt.show()
 
     def analyze_subwindows(self, TRIAL_NAMES=None, amplitude_threshold=225000, start_buffer=0.001, 
@@ -596,110 +605,127 @@ class VonFreyAnalysis:
 
         return self.windowed_results
 
-    def analyze_trial_clusters(self, rat_id, trial_name=None, plot_results=True, save_plots=True):
+    def psth(self, spike_times, event_onsets, window=(-1, 3), bin_ms=50, fs=30000):
+        import numpy as np
+        bins = np.arange(window[0]*1e3, window[1]*1e3+bin_ms, bin_ms)
+        counts = np.zeros_like(bins[:-1], dtype=float)
+        for t0 in event_onsets:
+            rel = (spike_times - t0) / fs * 1e3  # ms
+            counts += np.histogram(rel, bins)[0]
+        return bins[:-1]+bin_ms/2, counts / (len(event_onsets)*bin_ms/1e3)  # Hz
+
+    def is_responsive_psth(self, spike_times, event_onsets, window=(-1,3), bin_ms=50, fs=30000, N=3, n_shuffles=1000, alpha=0.05, random_state=None):
+        import numpy as np
+        rng = np.random.default_rng(random_state)
+        bins = np.arange(window[0]*1e3, window[1]*1e3+bin_ms, bin_ms)
+        # Real PSTH
+        t_centers, real_psth = self.psth(spike_times, event_onsets, window, bin_ms, fs)
+        # Shuffle PSTHs
+        shuff_psths = np.zeros((n_shuffles, len(real_psth)))
+        event_onsets = np.array(event_onsets)
+        min_onset = np.min(event_onsets)
+        max_onset = np.max(event_onsets)
+        window_samples = int((window[1] - window[0]) * fs)
+        for i in range(n_shuffles):
+            # Jitter each onset within the valid range
+            jitter = rng.uniform(-0.5, 0.5, size=event_onsets.shape) * window_samples
+            shuffled_onsets = event_onsets + jitter.astype(int)
+            # Keep within bounds
+            shuffled_onsets = np.clip(shuffled_onsets, min_onset, max_onset)
+            _, shuff_psths[i] = self.psth(spike_times, shuffled_onsets, window, bin_ms, fs)
+        # For each bin, get the (1-alpha) quantile of the shuffled distribution
+        threshold = np.quantile(shuff_psths, 1-alpha, axis=0)
+        # Find bins where real PSTH exceeds threshold
+        above = real_psth > threshold
+        # Find runs of consecutive bins above threshold
+        from itertools import groupby
+        from operator import itemgetter
+        idx = np.where(above)[0]
+        runs = [list(map(itemgetter(1), g)) for k, g in groupby(enumerate(idx), lambda x: x[1]-x[0])]
+        max_run = max((len(run) for run in runs), default=0)
+        is_resp = max_run >= N
+        return is_resp, real_psth, threshold, t_centers, above
+
+    def analyze_trial_clusters(self, rat_id, trial_name=None, plot_results=True, save_plots=True, psth_responsive=None):    
         """
         Performs comprehensive analysis of spike data, waveforms, and von Frey correlations for all good clusters in a trial.
-        
-        Parameters:
-        -----------
-        rat_id : str
-            The ID of the rat to analyze
-        trial_name : str, optional
-            Specific trial to analyze. If None, analyzes all trials for this rat.
-        plot_results : bool, default=True
-            Whether to display plots
-        save_plots : bool, default=True
-            Whether to save plots to disk
-        
-        Returns:
-        --------
-        dict
-            Dictionary containing analysis results for each trial
+        Now includes PSTH-based responsiveness detection for each cluster.
         """
         from automations.plots import plot_raster, plot_waveform
         import matplotlib.pyplot as plt
-        
+        import numpy as np
+        from pathlib import Path
         # Get the kilosort wrapper for this rat
         ksw = self.spikes
-        
         # Get list of trials to analyze
         if trial_name is not None:
             trial_list = [trial_name]
         else:
             trial_list = list(ksw.kilosort_results.keys())
-        
         results = {}
-        
         for trial in trial_list:
             print(f"\nAnalyzing trial: {trial}")
             trial_results = {}
-            
             # Get good clusters
             good_clusters = ksw.get_good_clusters(trial)
             if not good_clusters:
                 print(f"No good clusters found for trial {trial}")
                 continue
-            
             # Get spike data
             spike_times_all = ksw.get_spike_times(trial)
             clusters = ksw.kilosort_results[trial]['spike_clusters']
             fs = ksw.kilosort_results[trial]['ops']['fs']
-            
             # Filter for good clusters
             good_mask = np.isin(clusters, good_clusters)
             spike_times_good = spike_times_all[good_mask]
             clusters_good = clusters[good_mask]
-            
             # Store basic info
             trial_results['good_clusters'] = good_clusters
             trial_results['fs'] = fs
-            
             # Get von Frey data
             recording = self.rat.analog_data[trial]
             von_frey_data = recording.get_traces(channel_ids=['ANALOG-IN-2'], return_scaled=True).flatten()
-            
             # Calculate correlations
             correlations, inv_isi_traces = self.compute_inv_isi_correlation_modular(
                 spike_times_good, clusters_good, fs, von_frey_data, window_size=15000
             )
-            
             # Store correlation results
             trial_results['correlations'] = correlations
             trial_results['inv_isi_traces'] = inv_isi_traces
-            
-            # Calculate pre/post correlations
-            total_duration = len(von_frey_data) / fs
-            half_duration = total_duration / 2
-            
-            pre_correlations, pre_traces = self.compute_inv_isi_correlation_modular(
-                spike_times_good, clusters_good, fs, von_frey_data, 
-                window_size=15000, time_window=(0, half_duration)
-            )
-            
-            post_correlations, post_traces = self.compute_inv_isi_correlation_modular(
-                spike_times_good, clusters_good, fs, von_frey_data, 
-                window_size=15000, time_window=(half_duration, total_duration)
-            )
-            
-            trial_results['pre_correlations'] = pre_correlations
-            trial_results['post_correlations'] = post_correlations
-            trial_results['pre_traces'] = pre_traces
-            trial_results['post_traces'] = post_traces
-            
+            # PSTH-based responsiveness for each cluster
+            # Use von Frey window onsets as events
+            if trial in self.von_frey_time_windows:
+                vf_windows = self.von_frey_time_windows[trial]
+            else:
+                vf_windows = self._extract_von_frey_windows_single_trial(trial)
+            event_onsets = vf_windows['adjusted_start_times'] * fs  # in samples
+            psth_responsive = {}
+            psth_details = {}
+            for cluster in good_clusters:
+                # Get spike times for this cluster (in samples)
+                st_samples = ksw.kilosort_results[trial]['spike_times'][ksw.kilosort_results[trial]['spike_clusters'] == cluster]
+                is_resp, real_psth, threshold, t_centers, above = self.is_responsive_psth(
+                    st_samples, event_onsets,
+                    window=(-1,3), bin_ms=50, fs=fs, N=3, n_shuffles=1000, alpha=0.05
+                )
+                psth_responsive[cluster] = is_resp
+                psth_details[cluster] = {
+                    'real_psth': real_psth,
+                    'threshold': threshold,
+                    't_centers': t_centers,
+                    'above': above
+                }
+            trial_results['psth_responsive'] = psth_responsive
+            trial_results['psth_details'] = psth_details
             if plot_results:
-                # Create figures directory if it doesn't exist
                 figures_dir = Path(self.spikes.SAVE_DIRECTORY) / 'figures' / trial
                 if save_plots:
                     figures_dir.mkdir(parents=True, exist_ok=True)
-                
-                # Plot raster
                 fig_raster = plot_raster(spike_times_good, clusters_good, fs=fs, 
                                        title=f'Raster: {trial}')
                 if save_plots:
                     plt.savefig(figures_dir / f'raster_{trial}.png')
                     plt.close()
-                
-                # Plot waveforms for each good cluster
                 for cluster in good_clusters:
                     waveform = ksw.get_waveform(trial, cluster)
                     if waveform is not None:
@@ -708,49 +734,50 @@ class VonFreyAnalysis:
                         if save_plots:
                             plt.savefig(figures_dir / f'waveform_{trial}_cluster_{cluster}.png')
                             plt.close()
-                
-                # Plot correlation results for each cluster
                 for cluster in correlations.keys():
-                    # Full recording correlation
                     self.plot_inv_isi_vs_von_frey(von_frey_data, inv_isi_traces, 
                                                 correlations, trial, cluster,
                                                 title=f'Full Recording: {trial}, Cluster {cluster}')
                     if save_plots:
                         plt.savefig(figures_dir / f'correlation_full_{trial}_cluster_{cluster}.png')
                         plt.close()
-                    
-                    # Pre-stim correlation
-                    self.plot_inv_isi_vs_von_frey(
-                        von_frey_data[:int(half_duration*fs)],
-                        pre_traces, pre_correlations, trial, cluster,
-                        title=f'Pre-stim: {trial}, Cluster {cluster}'
-                    )
-                    if save_plots:
-                        plt.savefig(figures_dir / f'correlation_pre_{trial}_cluster_{cluster}.png')
-                        plt.close()
-                    
-                    # Post-stim correlation
-                    self.plot_inv_isi_vs_von_frey(
-                        von_frey_data[int(half_duration*fs):],
-                        post_traces, post_correlations, trial, cluster,
-                        title=f'Post-stim: {trial}, Cluster {cluster}'
-                    )
-                    if save_plots:
-                        plt.savefig(figures_dir / f'correlation_post_{trial}_cluster_{cluster}.png')
-                        plt.close()
-            
-            # Print summary for this trial
-            print(f"\nResults for trial {trial}:")
-            print("=" * 50)
-            for cluster in good_clusters:
-                print(f"\nCluster {cluster}:")
-                print(f"  Full recording correlation: {correlations.get(cluster, 'N/A'):.3f}")
-                print(f"  Pre-stim correlation:      {pre_correlations.get(cluster, 'N/A'):.3f}")
-                print(f"  Post-stim correlation:     {post_correlations.get(cluster, 'N/A'):.3f}")
-                if cluster in pre_correlations and cluster in post_correlations:
-                    change = post_correlations[cluster] - pre_correlations[cluster]
-                    print(f"  Change:                    {change:.3f}")
-            
             results[trial] = trial_results
-        
+        return results
+
+    def test_responsiveness_in_windows(self, spike_times, windows, fs, baseline=(-2, 0), n_shuffles=1000, alpha=0.05):
+        """
+        For each window (start, end in seconds), compare firing rate inside vs. baseline.
+        Returns: list of dicts with window info and significance.
+        """
+        import numpy as np
+        results = []
+        spike_times_sec = spike_times / fs
+        for start, end in zip(windows['adjusted_start_times'], windows['adjusted_end_times']):
+            # Firing rate in window
+            n_spikes = np.sum((spike_times_sec >= start) & (spike_times_sec < end))
+            duration = end - start
+            fr_in = n_spikes / duration if duration > 0 else 0
+
+            # Baseline: same duration, just before window
+            base_start = start + baseline[0]
+            base_end = start + baseline[1]
+            n_spikes_base = np.sum((spike_times_sec >= base_start) & (spike_times_sec < base_end))
+            base_duration = base_end - base_start
+            fr_base = n_spikes_base / base_duration if base_duration > 0 else 0
+
+            # Shuffle: randomly shift window within recording, recompute difference
+            diffs = []
+            rec_duration = spike_times_sec.max()
+            for _ in range(n_shuffles):
+                shift = np.random.uniform(0, rec_duration - duration)
+                n_spikes_shuff = np.sum((spike_times_sec >= shift) & (spike_times_sec < shift + duration))
+                n_spikes_base_shuff = np.sum((spike_times_sec >= shift + baseline[0]) & (spike_times_sec < shift + baseline[1]))
+                fr_shuff = n_spikes_shuff / duration if duration > 0 else 0
+                fr_base_shuff = n_spikes_base_shuff / base_duration if base_duration > 0 else 0
+                diffs.append(fr_shuff - fr_base_shuff)
+            # p-value: how often is the real difference greater than shuffled
+            real_diff = fr_in - fr_base
+            pval = np.mean(np.array(diffs) >= real_diff)
+            is_resp = pval < alpha
+            results.append({'start': start, 'end': end, 'fr_in': fr_in, 'fr_base': fr_base, 'pval': pval, 'is_responsive': is_resp})
         return results
