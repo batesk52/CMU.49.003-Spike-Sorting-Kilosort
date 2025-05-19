@@ -396,6 +396,21 @@ class Kilosort_wrapper:
             self.apply_custom_labels_to_trial(folder.name, custom_criteria=custom_criteria)
     
     def extract_kilosort_outputs(self):
+        """
+        Extracts and organizes Kilosort4 output files for each trial into a structured dictionary.
+        
+        The following files are loaded for each trial:
+        - ops.npy: Contains all Kilosort configuration parameters and runtime information
+        - cluster_Amplitude.tsv: Average spike amplitude for each neural cluster
+        - cluster_ContamPct.tsv: Estimated contamination percentage for each cluster
+        - spike_times.npy: Timestamps of all detected spikes (in samples)
+        - spike_clusters.npy: Cluster ID assignments for each spike
+        - channel_map.npy: Mapping of channel indices to physical probe locations
+        - templates.npy: Average spike waveform templates for each cluster
+        - amplitudes.npy: Scaling factors for each spike relative to its template
+
+        The data is stored in self.kilosort_results[trial_name] as a dictionary.
+        """
         binary_dir = self.SAVE_DIRECTORY / 'binary'
         trial_folders = [f for f in binary_dir.iterdir() if f.is_dir()]
         if not trial_folders:
@@ -408,23 +423,37 @@ class Kilosort_wrapper:
                 if not results_dir.exists():
                     print(f"Kilosort directory not found for trial: {trial_name}")
                     continue
+                
+                # Load Kilosort configuration and runtime info
                 ops = np.load(results_dir / 'ops.npy', allow_pickle=True).item()
-                camps = pd.read_csv(results_dir / 'cluster_Amplitude.tsv', sep='\t')['Amplitude'].values
-                contam_pct = pd.read_csv(results_dir / 'cluster_ContamPct.tsv', sep='\t')['ContamPct'].values
+                
+                # Load cluster quality metrics
+                camps = pd.read_csv(results_dir / 'cluster_Amplitude.tsv', sep='\t')['Amplitude'].values  # Spike amplitudes per cluster
+                contam_pct = pd.read_csv(results_dir / 'cluster_ContamPct.tsv', sep='\t')['ContamPct'].values  # Contamination % per cluster
+                
+                # Ensure consistent array lengths
                 min_len = min(len(camps), len(contam_pct))
                 camps = camps[:min_len]
                 contam_pct = contam_pct[:min_len]
                 N_clusters = min_len
                 all_clusters = np.arange(N_clusters)
-                st = np.load(results_dir / 'spike_times.npy')
-                clu = np.load(results_dir / 'spike_clusters.npy')
+                
+                # Load spike timing data
+                st = np.load(results_dir / 'spike_times.npy')  # Timestamps in samples (30kHz sampling rate)
+                clu = np.load(results_dir / 'spike_clusters.npy')  # Cluster assignments for each spike
+                
+                # Calculate firing rates (Hz) for each cluster
                 firing_rates = np.array([(clu == c).sum() * 30000 / st.max() for c in all_clusters])
                 assert len(firing_rates) == len(camps) == len(contam_pct), f"Mismatch: firing_rates={len(firing_rates)}, camps={len(camps)}, contam_pct={len(contam_pct)}"
-                chan_map = np.load(results_dir / 'channel_map.npy')
-                templates = np.load(results_dir / 'templates.npy')
-                chan_best = chan_map[(templates**2).sum(axis=1).argmax(axis=-1)]
-                amplitudes = np.load(results_dir / 'amplitudes.npy')
-                dshift = ops['dshift']
+                
+                # Load channel and template data
+                chan_map = np.load(results_dir / 'channel_map.npy')  # Maps channel indices to probe locations
+                templates = np.load(results_dir / 'templates.npy')  # Average waveform template for each cluster
+                chan_best = chan_map[(templates**2).sum(axis=1).argmax(axis=-1)]  # Best channel for each cluster
+                amplitudes = np.load(results_dir / 'amplitudes.npy')  # Scaling factor for each spike
+                dshift = ops['dshift']  # Estimated drift over time in micrometers
+                
+                # Store all extracted data in results dictionary
                 self.kilosort_results[trial_name] = {
                     'ops': ops,
                     'cluster_amplitudes': camps,
@@ -442,6 +471,7 @@ class Kilosort_wrapper:
             except Exception as trial_error:
                 print(f"Error loading Kilosort outputs for trial {trial_folder.name}: {trial_error}")
                 continue
+
 
 
     ##### new method
@@ -467,25 +497,50 @@ class Kilosort_wrapper:
                     print(f"Results directory not found for trial: {trial_name}")
                     continue
 
-                # Load kilosort outputs
+                # Load Kilosort configuration and outputs
+                # ops.npy contains all the parameters and settings used during the Kilosort run
                 ops = np.load(results_dir / 'ops.npy', allow_pickle=True).item()
+                # dshift tracks the estimated drift of neurons over time (in micrometers)
                 dshift = ops['dshift']
+
+                # Load cluster (neuron) quality metrics
+                # cluster_Amplitude.tsv contains the average spike amplitude for each cluster
                 camps = pd.read_csv(results_dir / 'cluster_Amplitude.tsv', sep='\t')['Amplitude'].values
+                # cluster_ContamPct.tsv contains the estimated contamination % for each cluster
+                # (how many spikes might be from other neurons)
                 contam_pct = pd.read_csv(results_dir / 'cluster_ContamPct.tsv', sep='\t')['ContamPct'].values
+
+                # Ensure camps and contam_pct arrays have same length by truncating to shorter one
                 min_len = min(len(camps), len(contam_pct))
                 camps = camps[:min_len]
                 contam_pct = contam_pct[:min_len]
-                N_clusters = min_len
+                N_clusters = min_len  # Total number of neural clusters/units
                 all_clusters = np.arange(N_clusters)
+
+                # Load spike data
+                # spike_times.npy contains timestamps of all detected spikes (in samples)
                 st = np.load(results_dir / 'spike_times.npy')
+                # spike_clusters.npy contains cluster ID for each spike
                 clu = np.load(results_dir / 'spike_clusters.npy')
+
+                # Calculate firing rates for each cluster (in Hz)
+                # Formula: (number of spikes) * (sampling rate) / (total recording time)
                 firing_rates = np.array([(clu == c).sum() * 30000 / st.max() for c in all_clusters])
+                # Verify all metrics arrays have matching lengths
                 assert len(firing_rates) == len(camps) == len(contam_pct), f"Mismatch: firing_rates={len(firing_rates)}, camps={len(camps)}, contam_pct={len(contam_pct)}"
+
+                # Load channel and template information
+                # channel_map.npy contains the mapping of channel indices to physical probe channels
                 chan_map = np.load(results_dir / 'channel_map.npy')
+                # templates.npy contains the average spike waveform for each cluster
                 templates = np.load(results_dir / 'templates.npy')
-                # Determine best channel from template energy
+
+                # Find the best (strongest signal) channel for each cluster
+                # by finding channel with maximum energy in the template
                 chan_best_idx = (templates**2).sum(axis=1).argmax(axis=-1)
                 chan_best = chan_map[chan_best_idx]
+
+                # amplitudes.npy contains the scaling factor for each spike relative to its template
                 amplitudes = np.load(results_dir / 'amplitudes.npy')
                 
                 # Configure matplotlib style
@@ -739,18 +794,52 @@ class Kilosort_wrapper:
     def get_good_clusters(self, trial_name):
         """
         Return a list of cluster IDs labeled as 'good' for a given trial.
+        First tries to read from cluster_group.tsv, falls back to cluster_KSLabel.tsv if not found.
         """
         import pandas as pd
         trial_results_dir = self.SAVE_DIRECTORY / "binary" / trial_name / "kilosort4"
+        
+        # First try cluster_group.tsv
+        group_file = trial_results_dir / "cluster_group.tsv"
+        if group_file.exists():
+            try:
+                # Read TSV file with explicit column names
+                df_labels = pd.read_csv(group_file, sep='\t')
+                print(f"Found columns in cluster_group.tsv: {df_labels.columns.tolist()}")
+                
+                # Check if we have the expected columns
+                if 'cluster_id' in df_labels.columns and 'group' in df_labels.columns:
+                    good_clusters = df_labels[df_labels['group'].str.lower() == 'good']['cluster_id'].tolist()
+                    print(f"Found {len(good_clusters)} good clusters in cluster_group.tsv")
+                    return good_clusters
+                else:
+                    print(f"Warning: Expected columns not found in {group_file}")
+            except Exception as e:
+                print(f"Error reading {group_file}: {str(e)}")
+        
+        # Fall back to cluster_KSLabel.tsv
+        print(f"Trying cluster_KSLabel.tsv for trial: {trial_name}")
         cluster_file = trial_results_dir / "cluster_KSLabel.tsv"
         if not cluster_file.exists():
             print(f"Cluster label file not found for trial: {trial_name}")
             return []
-        df_labels = pd.read_csv(cluster_file, sep="\t")
-        good_clusters = df_labels[df_labels["KSLabel"].str.lower() == "good"]["cluster_id"].tolist()
-        if len(good_clusters) == 0:
-            print(f"No good clusters found for trial: {trial_name}")
-        return good_clusters
+        
+        try:
+            # Read TSV file with explicit column names
+            df_labels = pd.read_csv(cluster_file, sep='\t')
+            print(f"Found columns in cluster_KSLabel.tsv: {df_labels.columns.tolist()}")
+            
+            # Check if we have the expected columns
+            if 'cluster_id' in df_labels.columns and 'KSLabel' in df_labels.columns:
+                good_clusters = df_labels[df_labels['KSLabel'].str.lower() == 'good']['cluster_id'].tolist()
+                print(f"Found {len(good_clusters)} good clusters in cluster_KSLabel.tsv")
+                return good_clusters
+            else:
+                print(f"Warning: Expected columns not found in {cluster_file}")
+                return []
+        except Exception as e:
+            print(f"Error reading {cluster_file}: {str(e)}")
+            return []
 
     def get_good_clusters_from_group(self, trial_name):
         """

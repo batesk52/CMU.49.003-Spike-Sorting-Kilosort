@@ -87,12 +87,20 @@ class VonFreyAnalysis:
         self.inv_isi_correlations = {}   # {trial: {cluster_id: correlation}}
         self.inv_isi_traces = {}         # {trial: {cluster_id: np.ndarray}}
 
-    def _smooth_moving_average(self, signal, window_size=15000):
+    def _smooth_moving_average(self, signal, window_size=15000, causal=False):
         """
         Smooth 'signal' by convolving with a ones kernel of size 'window_size'.
+        If causal=True, only past values are used (moving average up to current point).
+        If causal=False, uses centered window (default, as before).
         """
         kernel = np.ones(window_size) / window_size
-        return np.convolve(signal, kernel, mode='same')
+        if causal:
+            # Causal: only past and current values
+            smoothed = np.convolve(signal, kernel, mode='full')[:len(signal)]
+        else:
+            # Centered (default)
+            smoothed = np.convolve(signal, kernel, mode='same')
+        return smoothed
 
     def extract_von_frey_windows(self, TRIAL_NAMES=None, amplitude_threshold=225000, 
                                  start_buffer=0.001, end_buffer=0.001):
@@ -419,57 +427,82 @@ class VonFreyAnalysis:
         self.inv_isi_traces[trial_name] = inv_isi_traces
         return correlations, inv_isi_traces
 
-    def compute_inv_isi_correlation_modular(self, spike_times, clusters, fs, von_frey_data, window_size=15000):
+    def compute_inv_isi_correlation_modular(self, spike_times, clusters, fs, von_frey_data, window_size=15000, time_window=None):
         """
         Modular version: Compute the correlation between a smoothed inverse-ISI trace per cluster and the Von Frey signal.
+        Uses causal smoothing for ISI trace.
         Arguments:
             spike_times: array-like, spike times (in samples or seconds; if samples, fs must be provided)
             clusters: array-like, cluster assignments for each spike
             fs: sampling rate (Hz)
             von_frey_data: array-like, analog trace (should be same length as recording)
             window_size: smoothing window size (in samples)
+            time_window: tuple of (start_time, end_time) in seconds, or None for full trace
         Returns:
             correlations: dict of cluster_id -> correlation value
             inv_isi_traces: dict of cluster_id -> smoothed inverse-ISI trace
         """
-        # If spike_times are in samples, convert to integer indices
-        if np.max(spike_times) > 1000:  # crude check: likely in samples
-            spike_indices = spike_times.astype(int)
-        else:  # likely in seconds
-            spike_indices = (spike_times * fs).astype(int)
+        # Pre-allocate arrays and dictionaries
         N = len(von_frey_data)
         unique_clusters = np.unique(clusters)
         correlations = {}
         inv_isi_traces = {}
+
+        # Convert spike times to indices once
+        if np.max(spike_times) > 1000:  # crude check: likely in samples
+            spike_indices = spike_times.astype(int)
+        else:  # likely in seconds
+            spike_indices = (spike_times * fs).astype(int)
+
+        # Handle time window if specified
+        if time_window is not None:
+            start_idx = int(time_window[0] * fs)
+            end_idx = int(time_window[1] * fs)
+            von_frey_data = von_frey_data[start_idx:end_idx]
+            N = len(von_frey_data)
+            # Filter spikes to only those within the time window
+            mask = (spike_indices >= start_idx) & (spike_indices < end_idx)
+            spike_indices = spike_indices[mask] - start_idx  # Adjust indices relative to window start
+            clusters = clusters[mask]
+
+        # Pre-compute von frey std since it's used for every cluster
+        std_vf = np.std(von_frey_data)
+
+        # Process each cluster
         for cluster in unique_clusters:
-            cluster_spike_indices = np.sort(spike_indices[clusters == cluster])
-            inv_isi_trace = np.zeros(N, dtype=float)
+            # Get sorted spike indices for this cluster
+            cluster_mask = clusters == cluster
+            cluster_spike_indices = np.sort(spike_indices[cluster_mask])
+
+            # Skip clusters with too few spikes
             if len(cluster_spike_indices) < 2:
                 correlations[cluster] = 0.0
-                inv_isi_traces[cluster] = inv_isi_trace
+                inv_isi_traces[cluster] = np.zeros(N, dtype=float)
                 continue
-            for i in range(len(cluster_spike_indices) - 1):
-                s_k = cluster_spike_indices[i]
-                s_next = cluster_spike_indices[i + 1]
-                if s_k >= N:
+
+            # Pre-allocate inverse ISI trace
+            inv_isi_trace = np.zeros(N, dtype=float)
+
+            # Compute ISIs in one go
+            isis = np.diff(cluster_spike_indices)
+            isis[isis == 0] = 1  # Avoid division by zero
+            
+            # Fill the trace more efficiently
+            for i, (start, isi) in enumerate(zip(cluster_spike_indices[:-1], isis)):
+                if start >= N:
                     break
-                if s_next > N:
-                    s_next = N
-                isi = s_next - s_k
-                if isi == 0:
-                    isi = 1
-                inv_isi_trace[s_k:s_next] = 1.0 / isi
-            inv_isi_trace_smoothed = self._smooth_moving_average(inv_isi_trace, window_size=window_size)
+                end = min(cluster_spike_indices[i + 1], N)
+                inv_isi_trace[start:end] = 1.0 / isi
+
+            # Smooth and compute correlation (now using causal smoothing)
+            inv_isi_trace_smoothed = self._smooth_moving_average(inv_isi_trace, window_size=window_size, causal=True)
             std_inv = np.std(inv_isi_trace_smoothed)
-            std_vf = np.std(von_frey_data)
+            
             corr_val = 0.0 if std_inv == 0 or std_vf == 0 else np.corrcoef(inv_isi_trace_smoothed, von_frey_data)[0, 1]
+            
             correlations[cluster] = corr_val
             inv_isi_traces[cluster] = inv_isi_trace_smoothed
-        # Store for later access
-        self.inv_isi_modular_results = {
-            'correlations': correlations,
-            'inv_isi_traces': inv_isi_traces
-        }
+
         return correlations, inv_isi_traces
 
     def plot_inv_isi_vs_von_frey(self, von_frey_data, inv_isi_traces, correlations, trial_name, cluster_id, title=None):
@@ -562,3 +595,162 @@ class VonFreyAnalysis:
             self.windowed_results[trial_name] = {'avg_voltage_df': avg_voltage_df, 'firing_rates_df': firing_rates_df}
 
         return self.windowed_results
+
+    def analyze_trial_clusters(self, rat_id, trial_name=None, plot_results=True, save_plots=True):
+        """
+        Performs comprehensive analysis of spike data, waveforms, and von Frey correlations for all good clusters in a trial.
+        
+        Parameters:
+        -----------
+        rat_id : str
+            The ID of the rat to analyze
+        trial_name : str, optional
+            Specific trial to analyze. If None, analyzes all trials for this rat.
+        plot_results : bool, default=True
+            Whether to display plots
+        save_plots : bool, default=True
+            Whether to save plots to disk
+        
+        Returns:
+        --------
+        dict
+            Dictionary containing analysis results for each trial
+        """
+        from automations.plots import plot_raster, plot_waveform
+        import matplotlib.pyplot as plt
+        
+        # Get the kilosort wrapper for this rat
+        ksw = self.spikes
+        
+        # Get list of trials to analyze
+        if trial_name is not None:
+            trial_list = [trial_name]
+        else:
+            trial_list = list(ksw.kilosort_results.keys())
+        
+        results = {}
+        
+        for trial in trial_list:
+            print(f"\nAnalyzing trial: {trial}")
+            trial_results = {}
+            
+            # Get good clusters
+            good_clusters = ksw.get_good_clusters(trial)
+            if not good_clusters:
+                print(f"No good clusters found for trial {trial}")
+                continue
+            
+            # Get spike data
+            spike_times_all = ksw.get_spike_times(trial)
+            clusters = ksw.kilosort_results[trial]['spike_clusters']
+            fs = ksw.kilosort_results[trial]['ops']['fs']
+            
+            # Filter for good clusters
+            good_mask = np.isin(clusters, good_clusters)
+            spike_times_good = spike_times_all[good_mask]
+            clusters_good = clusters[good_mask]
+            
+            # Store basic info
+            trial_results['good_clusters'] = good_clusters
+            trial_results['fs'] = fs
+            
+            # Get von Frey data
+            recording = self.rat.analog_data[trial]
+            von_frey_data = recording.get_traces(channel_ids=['ANALOG-IN-2'], return_scaled=True).flatten()
+            
+            # Calculate correlations
+            correlations, inv_isi_traces = self.compute_inv_isi_correlation_modular(
+                spike_times_good, clusters_good, fs, von_frey_data, window_size=15000
+            )
+            
+            # Store correlation results
+            trial_results['correlations'] = correlations
+            trial_results['inv_isi_traces'] = inv_isi_traces
+            
+            # Calculate pre/post correlations
+            total_duration = len(von_frey_data) / fs
+            half_duration = total_duration / 2
+            
+            pre_correlations, pre_traces = self.compute_inv_isi_correlation_modular(
+                spike_times_good, clusters_good, fs, von_frey_data, 
+                window_size=15000, time_window=(0, half_duration)
+            )
+            
+            post_correlations, post_traces = self.compute_inv_isi_correlation_modular(
+                spike_times_good, clusters_good, fs, von_frey_data, 
+                window_size=15000, time_window=(half_duration, total_duration)
+            )
+            
+            trial_results['pre_correlations'] = pre_correlations
+            trial_results['post_correlations'] = post_correlations
+            trial_results['pre_traces'] = pre_traces
+            trial_results['post_traces'] = post_traces
+            
+            if plot_results:
+                # Create figures directory if it doesn't exist
+                figures_dir = Path(self.spikes.SAVE_DIRECTORY) / 'figures' / trial
+                if save_plots:
+                    figures_dir.mkdir(parents=True, exist_ok=True)
+                
+                # Plot raster
+                fig_raster = plot_raster(spike_times_good, clusters_good, fs=fs, 
+                                       title=f'Raster: {trial}')
+                if save_plots:
+                    plt.savefig(figures_dir / f'raster_{trial}.png')
+                    plt.close()
+                
+                # Plot waveforms for each good cluster
+                for cluster in good_clusters:
+                    waveform = ksw.get_waveform(trial, cluster)
+                    if waveform is not None:
+                        fig_wave = plot_waveform(waveform, 
+                                               title=f'Waveform: {trial}, Cluster {cluster}')
+                        if save_plots:
+                            plt.savefig(figures_dir / f'waveform_{trial}_cluster_{cluster}.png')
+                            plt.close()
+                
+                # Plot correlation results for each cluster
+                for cluster in correlations.keys():
+                    # Full recording correlation
+                    self.plot_inv_isi_vs_von_frey(von_frey_data, inv_isi_traces, 
+                                                correlations, trial, cluster,
+                                                title=f'Full Recording: {trial}, Cluster {cluster}')
+                    if save_plots:
+                        plt.savefig(figures_dir / f'correlation_full_{trial}_cluster_{cluster}.png')
+                        plt.close()
+                    
+                    # Pre-stim correlation
+                    self.plot_inv_isi_vs_von_frey(
+                        von_frey_data[:int(half_duration*fs)],
+                        pre_traces, pre_correlations, trial, cluster,
+                        title=f'Pre-stim: {trial}, Cluster {cluster}'
+                    )
+                    if save_plots:
+                        plt.savefig(figures_dir / f'correlation_pre_{trial}_cluster_{cluster}.png')
+                        plt.close()
+                    
+                    # Post-stim correlation
+                    self.plot_inv_isi_vs_von_frey(
+                        von_frey_data[int(half_duration*fs):],
+                        post_traces, post_correlations, trial, cluster,
+                        title=f'Post-stim: {trial}, Cluster {cluster}'
+                    )
+                    if save_plots:
+                        plt.savefig(figures_dir / f'correlation_post_{trial}_cluster_{cluster}.png')
+                        plt.close()
+            
+            # Print summary for this trial
+            print(f"\nResults for trial {trial}:")
+            print("=" * 50)
+            for cluster in good_clusters:
+                print(f"\nCluster {cluster}:")
+                print(f"  Full recording correlation: {correlations.get(cluster, 'N/A'):.3f}")
+                print(f"  Pre-stim correlation:      {pre_correlations.get(cluster, 'N/A'):.3f}")
+                print(f"  Post-stim correlation:     {post_correlations.get(cluster, 'N/A'):.3f}")
+                if cluster in pre_correlations and cluster in post_correlations:
+                    change = post_correlations[cluster] - pre_correlations[cluster]
+                    print(f"  Change:                    {change:.3f}")
+            
+            results[trial] = trial_results
+        
+        return results
