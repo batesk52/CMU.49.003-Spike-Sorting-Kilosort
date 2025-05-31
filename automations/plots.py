@@ -677,3 +677,89 @@ def plot_waveform(waveform, t=None, ax=None, title=None):
     ax.legend()
     plt.tight_layout()
     plt.show()
+
+def plot_waveforms_on_probe(trial_name, kilosort_results, n_spikes=100, n_clusters=None, time_scale=0.8):
+    """
+    Plot each cluster's template waveform at the (x, y) position of its best channel on the probe.
+    
+    Parameters
+    ----------
+    trial_name : str
+        Name of the trial to plot
+    kilosort_results : dict
+        Dictionary containing Kilosort results for the trial
+    n_spikes : int, optional
+        (Unused, for compatibility)
+    n_clusters : int, optional
+        Number of clusters to plot. If None, plots all clusters.
+    time_scale : float, optional
+        Scale factor for time axis width relative to electrode spacing, by default 0.8
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    
+    ops = kilosort_results['ops']
+    probe = ops['probe']
+    xc, yc = probe['xc'], probe['yc']
+    templates = kilosort_results['templates']  # shape: (n_clusters, n_timepoints, n_channels)
+    chan_map = kilosort_results['channel_mapping']
+    spike_clusters = kilosort_results['spike_clusters']
+    unique_clusters = np.unique(spike_clusters)
+    if n_clusters is not None:
+        unique_clusters = unique_clusters[:n_clusters]
+    fig, ax = plt.subplots(figsize=(8, 12))
+    
+    # Calculate electrode spacing for scaling
+    x_spacing = np.median(np.diff(np.sort(np.unique(xc)))) if len(np.unique(xc)) > 1 else 50
+    y_spacing = np.median(np.diff(np.sort(np.unique(yc)))) if len(np.unique(yc)) > 1 else 50
+    
+    # Find the rightmost position of the probe for label placement
+    x_max = np.max(xc)
+    label_x_offset = x_spacing * 0.5  # Position labels to the right of the probe
+    
+    for cluster_id in unique_clusters:
+        try:
+            # Get template for this cluster: shape (n_timepoints, n_channels)
+            template = templates[cluster_id]  # (n_timepoints, n_channels)
+            # Find best channel (max energy)
+            best_chan_idx = (template**2).sum(axis=0).argmax()
+            best_chan = chan_map[best_chan_idx]
+            # Get waveform for best channel
+            wv = template[:, best_chan_idx]
+            t_samples = np.arange(len(wv))  # time in samples
+            t_ms = (t_samples / ops['fs']) * 1000  # convert samples to milliseconds
+            
+            # Normalize waveform and scale relative to electrode spacing
+            wv_norm = wv / (np.abs(wv).max() + 1e-6)  # normalize to [-1, 1]
+            
+            # Center waveform at (x, y) of best channel
+            x_pos = xc[best_chan]
+            y_pos = yc[best_chan]
+            
+            # Scale time axis to be a fraction of x_spacing (now controllable)
+            t_scaled = (t_ms - t_ms.mean()) * (x_spacing * time_scale) / (t_ms.max() - t_ms.min())
+            
+            # Scale amplitude to be a fraction of y_spacing
+            amp_scaled = wv_norm * (y_spacing * 0.4)
+            
+            ax.plot(x_pos + t_scaled, y_pos + amp_scaled, color='k', linewidth=1.0, alpha=0.8)
+            
+            # Position cluster label to the right of the probe
+            ax.text(x_max + label_x_offset, y_pos, f'C{cluster_id}', fontsize=8, ha='left', va='center', 
+                   bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.7))
+        except Exception as e:
+            print(f"Error plotting cluster {cluster_id}: {str(e)}")
+            continue
+    # Plot all channel positions
+    ax.scatter(xc, yc, color='gray', s=20, alpha=0.5, marker='o')
+    ax.set_title(f'Waveforms along probe - Trial {trial_name}')
+    ax.set_xlabel('Index (2 ms window )')
+    ax.set_ylabel('Y position (μm)')
+    ax.grid(True, alpha=0.3)
+    ax.set_aspect('equal')
+    
+    # Invert y-axis so 0 is at top and 620 is at bottom
+    ax.invert_yaxis()
+    
+    plt.tight_layout()
+    return fig
