@@ -66,7 +66,7 @@ class Rat:
         self.import_matlab_files()
         self.import_intan_data()
 
-    def get_von_frey_analysis(self, si_wrapper, ks_wrapper, excel_parent_folder=None, **kwargs):
+    def get_von_frey_analysis(self, si_wrapper, ks_wrapper, excel_parent_folder=None, cluster_types='good', **kwargs):
         """
         Computes or loads the VonFrey analysis for this rat.
         
@@ -80,6 +80,10 @@ class Rat:
         ks_wrapper: The Kilosort_wrapper for this rat.
         excel_parent_folder: str or Path; the parent folder under which each rat's results
                             (in a subfolder named by RatID with a "tables" folder) might exist.
+        cluster_types: str; specifies which cluster types to analyze. Options:
+                      - 'good': only good clusters (default)
+                      - 'mua': only MUA clusters  
+                      - 'both': both good and MUA clusters
         kwargs: additional parameters for the analysis (e.g., subwindow_width, corr_threshold).
         
         Returns:
@@ -91,17 +95,47 @@ class Rat:
             if candidate.exists() and any(candidate.glob("*_average_vf_voltage_windowed.xlsx")):
                 return self.load_von_frey_analysis_results(candidate)
                 
-        # Get good clusters for each trial using cluster_group.tsv
-        good_clusters_by_trial = {}
+        # Get clusters for each trial based on specified cluster types
+        clusters_by_trial = {}
         for trial in ks_wrapper.kilosort_results.keys():
-            good_clusters_by_trial[trial] = ks_wrapper.get_good_clusters_from_group(trial)
+            clusters_for_trial = []
+            
+            if cluster_types in ['good', 'both']:
+                good_clusters = ks_wrapper.get_good_clusters_from_group(trial)
+                clusters_for_trial.extend(good_clusters)
+                
+            if cluster_types in ['mua', 'both']:
+                mua_clusters = ks_wrapper.get_mua_clusters_from_group(trial)
+                clusters_for_trial.extend(mua_clusters)
+            
+            # Remove duplicates (shouldn't be any, but just in case) and sort
+            clusters_by_trial[trial] = sorted(list(set(clusters_for_trial)))
+            
+            print(f"Trial {trial}: Using {len(clusters_by_trial[trial])} clusters (type: {cluster_types})")
         
         # Remove the extra key so that analyze_subwindows() does not receive it.
         kwargs.pop('excel_parent_folder', None)
+        kwargs.pop('cluster_types', None)  # Remove cluster_types from kwargs
+        
+        # Extract and preserve optimization parameters, then remove them from kwargs
+        fast_mode = kwargs.pop('fast_mode', False)
+        skip_correlations = kwargs.pop('skip_correlations', False) 
+        correlation_window_size = kwargs.pop('correlation_window_size', None)
+        
+        # Show what optimization settings are being used
+        print(f"[INFO] Using optimization settings: fast_mode={fast_mode}, skip_correlations={skip_correlations}")
+        if correlation_window_size:
+            print(f"[INFO] Custom correlation window size: {correlation_window_size}")
         
         from automations.analysis_functions import VonFreyAnalysis
         vfa = VonFreyAnalysis(self, si_wrapper, ks_wrapper)
-        return vfa.analyze_subwindows(good_clusters_by_trial=good_clusters_by_trial, **kwargs)
+        return vfa.analyze_subwindows(
+            good_clusters_by_trial=clusters_by_trial, 
+            fast_mode=fast_mode,
+            skip_correlations=skip_correlations,
+            correlation_window_size=correlation_window_size,
+            **kwargs
+        )
 
 
     def load_von_frey_analysis_results(self, excel_folder):
@@ -877,6 +911,43 @@ class Kilosort_wrapper:
         # Filter for 'good' clusters (case-insensitive, strip whitespace)
         good_clusters = df[df[label_col].str.strip().str.lower() == 'good'][cluster_col].tolist()
         return good_clusters
+
+    def get_mua_clusters_from_group(self, trial_name):
+        """
+        Returns a list of cluster IDs labeled as 'mua' in the cluster_group.tsv file for the given trial.
+        Handles possible whitespace and capitalization issues in column names.
+        """
+        import pandas as pd
+        from pathlib import Path
+
+        group_file = Path(self.SAVE_DIRECTORY) / "binary" / trial_name / "kilosort4" / "cluster_group.tsv"
+        if not group_file.exists():
+            print(f"[WARNING] cluster_group.tsv not found for trial: {trial_name}")
+            return []
+
+        df = pd.read_csv(group_file, sep='\t')
+        # Normalize column names
+        df.columns = df.columns.str.strip().str.lower()
+        # Find the correct columns
+        label_col = None
+        for candidate in ['group', 'kslabel', 'ks_label']:
+            if candidate in df.columns:
+                label_col = candidate
+                break
+        if label_col is None:
+            print(f"[ERROR] No label column found in {group_file}. Columns are: {df.columns.tolist()}")
+            return []
+        cluster_col = None
+        for candidate in ['cluster_id', 'clusterid', 'cluster']:
+            if candidate in df.columns:
+                cluster_col = candidate
+                break
+        if cluster_col is None:
+            print(f"[ERROR] No cluster_id column found in {group_file}. Columns are: {df.columns.tolist()}")
+            return []
+        # Filter for 'mua' clusters (case-insensitive, strip whitespace)
+        mua_clusters = df[df[label_col].str.strip().str.lower() == 'mua'][cluster_col].tolist()
+        return mua_clusters
 
 
 class RatGroup:

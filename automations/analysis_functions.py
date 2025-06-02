@@ -48,13 +48,28 @@ class MultiRatVonFreyAnalysis:
           excel_parent_folder: str or Path; the parent folder under which each rat's folder is located.
                                The method will look in: {excel_parent_folder}/{RatID}/tables
                                for Excel files.
-          kwargs: additional parameters (e.g., subwindow_width, corr_threshold) for analysis.
+          kwargs: additional parameters (e.g., subwindow_width, corr_threshold, fast_mode, skip_correlations, etc.) for analysis.
         
         Returns:
           combined_results: dict keyed by "RatID_TrialName" containing the analysis results.
         """
         combined_results = {}
+        
+        # Extract optimization parameters and show what's being used
+        fast_mode = kwargs.get('fast_mode', False)
+        skip_correlations = kwargs.get('skip_correlations', False)
+        correlation_window_size = kwargs.get('correlation_window_size', None)
+        cluster_types = kwargs.get('cluster_types', 'good')
+        
+        print(f"[INFO] Analysis settings:")
+        print(f"  - Cluster types: {cluster_types}")
+        print(f"  - Fast mode: {fast_mode}")
+        print(f"  - Skip correlations: {skip_correlations}")
+        if correlation_window_size:
+            print(f"  - Custom correlation window: {correlation_window_size}")
+        
         for rat_id, rat in self.rat_group.rats.items():
+            print(f"\n[INFO] Processing rat: {rat_id}")
             si = self.si_wrappers[rat_id]
             ks = self.ks_wrappers[rat_id]
             # Automatically decide: if the Excel files exist in the proper subfolder, load them.
@@ -62,6 +77,13 @@ class MultiRatVonFreyAnalysis:
             rat_kwargs = dict(kwargs)
             if 'good_clusters_by_trial' in kwargs:
                 rat_kwargs['good_clusters_by_trial'] = kwargs['good_clusters_by_trial'].get(rat_id, None)
+            
+            # Ensure optimization parameters are explicitly passed
+            rat_kwargs['fast_mode'] = fast_mode
+            rat_kwargs['skip_correlations'] = skip_correlations
+            if correlation_window_size is not None:
+                rat_kwargs['correlation_window_size'] = correlation_window_size
+                
             results = rat.get_von_frey_analysis(si, ks, excel_parent_folder=excel_parent_folder, **rat_kwargs)
             if results is None:
                 continue
@@ -87,12 +109,30 @@ class VonFreyAnalysis:
         self.inv_isi_correlations = {}   # {trial: {cluster_id: correlation}}
         self.inv_isi_traces = {}         # {trial: {cluster_id: np.ndarray}}
 
-    def _smooth_moving_average(self, signal, window_size=15000, causal=False):
+    def _smooth_moving_average(self, signal, window_size=15000, causal=False, use_fast_method=True):
         """
         Smooth 'signal' by convolving with a ones kernel of size 'window_size'.
         If causal=True, only past values are used (moving average up to current point).
         If causal=False, uses centered window (default, as before).
+        If use_fast_method=True, uses scipy for faster computation on large signals.
         """
+        if use_fast_method and len(signal) > 100000:  # Use faster method for large signals
+            try:
+                from scipy import ndimage
+                if causal:
+                    # For causal, we'll use a simple cumulative approach which is much faster
+                    padded = np.concatenate([np.zeros(window_size-1), signal])
+                    cumsum = np.cumsum(padded)
+                    smoothed = (cumsum[window_size-1:] - np.concatenate([np.zeros(1), cumsum[:-window_size]])) / window_size
+                    return smoothed[:len(signal)]
+                else:
+                    # Use scipy's uniform filter which is much faster than np.convolve
+                    smoothed = ndimage.uniform_filter1d(signal.astype(np.float64), size=window_size, mode='constant')
+                    return smoothed
+            except ImportError:
+                print("Warning: scipy not available, falling back to numpy method")
+        
+        # Original numpy method (fallback)
         kernel = np.ones(window_size) / window_size
         if causal:
             # Causal: only past and current values
@@ -535,14 +575,19 @@ class VonFreyAnalysis:
         plt.show()
 
     def analyze_subwindows(self, TRIAL_NAMES=None, amplitude_threshold=225000, start_buffer=0.001, 
-                           end_buffer=0.001, subwindow_width=0.5, corr_threshold=0.01, good_clusters_by_trial=None):
+                           end_buffer=0.001, subwindow_width=0.5, corr_threshold=0.01, good_clusters_by_trial=None,
+                           fast_mode=False, skip_correlations=False, correlation_window_size=None):
         """
-        High-level analysis pipeline that:
-          1. Extracts Von Frey windows.
-          2. Subdivides these intervals.
-          3. Computes average voltage and firing rates per subwindow.
-          4. Computes inverse-ISI correlations for each cluster.
-          5. Saves the results to Excel files.
+        Analyze Von Frey subwindows with optional performance optimizations.
+        
+        Parameters:
+        -----------
+        fast_mode : bool, default False
+            If True, automatically optimizes parameters for large cluster counts
+        skip_correlations : bool, default False
+            If True, skips inverse ISI correlation computation (much faster)
+        correlation_window_size : int, optional
+            Custom window size for correlation smoothing. If None, uses 15000 (or 5000 in fast_mode)
         """
         if TRIAL_NAMES is None:
             TRIAL_NAMES = list(self.spikes.kilosort_results.keys())
@@ -587,7 +632,28 @@ class VonFreyAnalysis:
                     cluster_cols = firing_rates_df.columns.tolist()
                 print(f"[INFO] Cluster columns present: {cluster_cols}")
 
-            correlations, _ = self.compute_inv_isi_correlation(trial_name, window_size=15000, good_clusters=good_clusters)
+            # Apply performance optimizations based on cluster count and settings
+            n_clusters = len(cluster_cols) if 'cluster_cols' in locals() else 0
+            
+            # Auto-enable fast mode for large cluster counts
+            if n_clusters > 50 and not fast_mode:
+                print(f"[INFO] Large number of clusters ({n_clusters}) detected. Consider using fast_mode=True for better performance.")
+            
+            # Set correlation window size based on mode
+            if correlation_window_size is None:
+                corr_window_size = 5000 if fast_mode else 15000
+            else:
+                corr_window_size = correlation_window_size
+            
+            # Compute correlations (unless skipped)
+            if skip_correlations:
+                print(f"[INFO] Skipping correlation computation for {trial_name} (skip_correlations=True)")
+                correlations = {}
+            else:
+                if fast_mode and n_clusters > 30:
+                    print(f"[INFO] Computing correlations for {n_clusters} clusters with fast mode (window_size={corr_window_size})...")
+                correlations, _ = self.compute_inv_isi_correlation(trial_name, window_size=corr_window_size, good_clusters=good_clusters)
+            
             if correlations:
                 corr_row = pd.DataFrame({cluster: [corr_val] for cluster, corr_val in correlations.items()},
                                         index=['correlation'])
@@ -595,13 +661,19 @@ class VonFreyAnalysis:
                                            index=['is_correlated'])
                 firing_rates_df = pd.concat([firing_rates_df, corr_row, is_corr_row], axis=0)
             else:
-                print(f"No correlations computed for trial '{trial_name}' or no clusters found.")
+                if not skip_correlations:
+                    print(f"No correlations computed for trial '{trial_name}' or no clusters found.")
+                # Add empty correlation rows when skipped
+                if skip_correlations and n_clusters > 0:
+                    empty_corr = pd.DataFrame({col: [np.nan] for col in cluster_cols}, index=['correlation'])
+                    empty_is_corr = pd.DataFrame({col: [False] for col in cluster_cols}, index=['is_correlated'])
+                    firing_rates_df = pd.concat([firing_rates_df, empty_corr, empty_is_corr], axis=0)
 
             tables_dir = Path(self.spikes.SAVE_DIRECTORY) / "tables"
             tables_dir.mkdir(parents=True, exist_ok=True)
             avg_voltage_df.to_excel(tables_dir / f"{trial_name}_average_vf_voltage_windowed.xlsx", index=False)
             firing_rates_df.to_excel(tables_dir / f"{trial_name}_cluster_firing_rates_windowed.xlsx")
-            self.windowed_results[trial_name] = {'avg_voltage_df': avg_voltage_df, 'firing_rates_df': firing_rates_df}
+            self.windowed_results[trial_name] = {'voltage_df': avg_voltage_df, 'firing_df': firing_rates_df}
 
         return self.windowed_results
 
