@@ -66,56 +66,87 @@ class Rat:
         self.import_matlab_files()
         self.import_intan_data()
 
-    def get_von_frey_analysis(self, si_wrapper, ks_wrapper, excel_parent_folder=None, cluster_types='good', **kwargs):
+    def get_von_frey_analysis(self, si_wrapper, ks_wrapper, excel_parent_folder=None, cluster_labels=None, **kwargs):
         """
         Computes or loads the VonFrey analysis for this rat.
         
-        If excel_parent_folder is provided, this method checks for a subfolder:
-        {excel_parent_folder}/{RatID}/tables
-        and if Excel files matching the naming pattern are found, it loads those results.
-        Otherwise, it runs the analysis.
-        
         Parameters:
+        -----------
         si_wrapper: The SpikeInterface_wrapper for this rat.
         ks_wrapper: The Kilosort_wrapper for this rat.
-        excel_parent_folder: str or Path; the parent folder under which each rat's results
-                            (in a subfolder named by RatID with a "tables" folder) might exist.
-        cluster_types: str; specifies which cluster types to analyze. Options:
-                      - 'good': only good clusters (default)
-                      - 'mua': only MUA clusters  
-                      - 'both': both good and MUA clusters
-        kwargs: additional parameters for the analysis (e.g., subwindow_width, corr_threshold).
+        excel_parent_folder: str or Path; parent folder for cached results
+        cluster_labels: str, list, or dict; specifies which cluster labels to analyze:
+                       - str: single label (e.g., 'good')
+                       - list: multiple labels (e.g., ['good', 'mua'])
+                       - dict: {trial_name: labels} for per-trial customization
+                       - None: defaults to 'good'
+        kwargs: additional parameters for the analysis
         
         Returns:
+        --------
         results: dict keyed by trial names.
         """
         from pathlib import Path
+        print(f"\n[DEBUG] get_von_frey_analysis called for rat {self.RAT_ID}")
+        print(f"[DEBUG] cluster_labels type: {type(cluster_labels)}")
+        print(f"[DEBUG] cluster_labels value: {cluster_labels}")
+        
+        # --- Fix cache key for spreadsheet-driven cluster selection ---
+        use_xlsx_cache_key = False
+        if isinstance(cluster_labels, dict):
+            # If all values are lists of ints or empty lists, treat as from spreadsheet
+            all_int_lists = True
+            for v in cluster_labels.values():
+                if v == []:
+                    continue
+                if not (isinstance(v, (list, tuple)) and all(isinstance(x, int) for x in v)):
+                    all_int_lists = False
+                    break
+            if all_int_lists:
+                use_xlsx_cache_key = True
         if excel_parent_folder is not None:
-            candidate = Path(excel_parent_folder) / self.RAT_ID / "tables"
-            if candidate.exists() and any(candidate.glob("*_average_vf_voltage_windowed.xlsx")):
-                return self.load_von_frey_analysis_results(candidate)
+            if use_xlsx_cache_key:
+                cache_key = f"{self.RAT_ID}_from_xlsx"
+            else:
+                cache_key = f"{self.RAT_ID}_{str(cluster_labels)}"
+            cache_dir = Path(excel_parent_folder) / cache_key / "tables"
+            
+            if cache_dir.exists() and any(cache_dir.glob("*_average_vf_voltage_windowed.xlsx")):
+                print(f"[DEBUG] Found cached results in {cache_dir}")
+                return self.load_von_frey_analysis_results(cache_dir)
+            else:
+                print(f"[DEBUG] No cached results found in {cache_dir}")
+        
+        # Set default cluster labels if none provided
+        if cluster_labels is None:
+            cluster_labels = 'good'
+            print(f"[DEBUG] Using default cluster_labels: {cluster_labels}")
                 
-        # Get clusters for each trial based on specified cluster types
+        # --- Fix: Use cluster IDs directly if provided, else use get_clusters_by_labels ---
         clusters_by_trial = {}
         for trial in ks_wrapper.kilosort_results.keys():
-            clusters_for_trial = []
-            
-            if cluster_types in ['good', 'both']:
-                good_clusters = ks_wrapper.get_good_clusters_from_group(trial)
-                clusters_for_trial.extend(good_clusters)
-                
-            if cluster_types in ['mua', 'both']:
-                mua_clusters = ks_wrapper.get_mua_clusters_from_group(trial)
-                clusters_for_trial.extend(mua_clusters)
-            
-            # Remove duplicates (shouldn't be any, but just in case) and sort
-            clusters_by_trial[trial] = sorted(list(set(clusters_for_trial)))
-            
-            print(f"Trial {trial}: Using {len(clusters_by_trial[trial])} clusters (type: {cluster_types})")
+            if isinstance(cluster_labels, dict):
+                trial_labels = cluster_labels.get(trial, 'good')
+            else:
+                trial_labels = cluster_labels
+
+            # If trial_labels is a list of ints (cluster IDs), use directly
+            if isinstance(trial_labels, (list, tuple)) and all(isinstance(x, int) for x in trial_labels):
+                clusters_for_trial = trial_labels
+            # If it's a single int, wrap in list
+            elif isinstance(trial_labels, int):
+                clusters_for_trial = [trial_labels]
+            # Otherwise, treat as label(s)
+            else:
+                clusters_for_trial = ks_wrapper.get_clusters_by_labels(trial, trial_labels)
+            clusters_by_trial[trial] = sorted(clusters_for_trial)
+            print(f"[DEBUG] Getting clusters for trial {trial} with labels: {trial_labels}")
+            print(f"[DEBUG] Found {len(clusters_by_trial[trial])} clusters for trial {trial}")
+            print(f"[DEBUG] Clusters: {clusters_by_trial[trial]}")
         
-        # Remove the extra key so that analyze_subwindows() does not receive it.
+        # Clean up kwargs
         kwargs.pop('excel_parent_folder', None)
-        kwargs.pop('cluster_types', None)  # Remove cluster_types from kwargs
+        kwargs.pop('cluster_labels', None)
         
         # Extract and preserve optimization parameters, then remove them from kwargs
         fast_mode = kwargs.pop('fast_mode', False)
@@ -123,19 +154,27 @@ class Rat:
         correlation_window_size = kwargs.pop('correlation_window_size', None)
         
         # Show what optimization settings are being used
-        print(f"[INFO] Using optimization settings: fast_mode={fast_mode}, skip_correlations={skip_correlations}")
+        print(f"[DEBUG] Using optimization settings: fast_mode={fast_mode}, skip_correlations={skip_correlations}")
         if correlation_window_size:
-            print(f"[INFO] Custom correlation window size: {correlation_window_size}")
+            print(f"[DEBUG] Custom correlation window size: {correlation_window_size}")
         
         from automations.analysis_functions import VonFreyAnalysis
         vfa = VonFreyAnalysis(self, si_wrapper, ks_wrapper)
-        return vfa.analyze_subwindows(
+        results = vfa.analyze_subwindows(
             good_clusters_by_trial=clusters_by_trial, 
             fast_mode=fast_mode,
             skip_correlations=skip_correlations,
             correlation_window_size=correlation_window_size,
             **kwargs
         )
+        
+        # Save results to cache if excel_parent_folder is provided
+        if excel_parent_folder is not None:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            vfa.save_results_to_excel(results, cache_dir)
+            
+        print(f"[DEBUG] Analysis complete. Got results for {len(results)} trials")
+        return results
 
 
     def load_von_frey_analysis_results(self, excel_folder):
@@ -875,13 +914,30 @@ class Kilosort_wrapper:
             print(f"Error reading {cluster_file}: {str(e)}")
             return []
 
-    def get_good_clusters_from_group(self, trial_name):
+    def get_clusters_by_labels(self, trial_name, labels):
         """
-        Returns a list of cluster IDs labeled as 'good' in the cluster_group.tsv file for the given trial.
-        Handles possible whitespace and capitalization issues in column names.
+        Returns a list of cluster IDs that match any of the specified labels.
+        
+        Parameters:
+        -----------
+        trial_name : str
+            Name of the trial
+        labels : str or list
+            Single label (e.g., 'good') or list of labels (e.g., ['good', 'mua']) to filter by
+        
+        Returns:
+        --------
+        list : List of cluster IDs matching the specified labels
         """
         import pandas as pd
         from pathlib import Path
+
+        # Convert single label to list for consistency
+        if isinstance(labels, str):
+            labels = [labels]
+        
+        # Normalize labels (lowercase, stripped)
+        labels = [label.strip().lower() for label in labels]
 
         group_file = Path(self.SAVE_DIRECTORY) / "binary" / trial_name / "kilosort4" / "cluster_group.tsv"
         if not group_file.exists():
@@ -891,7 +947,8 @@ class Kilosort_wrapper:
         df = pd.read_csv(group_file, sep='\t')
         # Normalize column names
         df.columns = df.columns.str.strip().str.lower()
-        # Find the correct columns
+        
+        # Find the label column
         label_col = None
         for candidate in ['group', 'kslabel', 'ks_label']:
             if candidate in df.columns:
@@ -900,6 +957,8 @@ class Kilosort_wrapper:
         if label_col is None:
             print(f"[ERROR] No label column found in {group_file}. Columns are: {df.columns.tolist()}")
             return []
+            
+        # Find the cluster ID column
         cluster_col = None
         for candidate in ['cluster_id', 'clusterid', 'cluster']:
             if candidate in df.columns:
@@ -908,46 +967,24 @@ class Kilosort_wrapper:
         if cluster_col is None:
             print(f"[ERROR] No cluster_id column found in {group_file}. Columns are: {df.columns.tolist()}")
             return []
-        # Filter for 'good' clusters (case-insensitive, strip whitespace)
-        good_clusters = df[df[label_col].str.strip().str.lower() == 'good'][cluster_col].tolist()
-        return good_clusters
+        
+        # Filter for clusters matching any of the specified labels
+        normalized_df_labels = df[label_col].str.strip().str.lower()
+        matching_clusters = df[normalized_df_labels.isin(labels)][cluster_col].tolist()
+        
+        return matching_clusters
+
+    def get_good_clusters_from_group(self, trial_name):
+        """
+        Returns a list of cluster IDs labeled as 'good' in the cluster_group.tsv file for the given trial.
+        """
+        return self.get_clusters_by_labels(trial_name, 'good')
 
     def get_mua_clusters_from_group(self, trial_name):
         """
         Returns a list of cluster IDs labeled as 'mua' in the cluster_group.tsv file for the given trial.
-        Handles possible whitespace and capitalization issues in column names.
         """
-        import pandas as pd
-        from pathlib import Path
-
-        group_file = Path(self.SAVE_DIRECTORY) / "binary" / trial_name / "kilosort4" / "cluster_group.tsv"
-        if not group_file.exists():
-            print(f"[WARNING] cluster_group.tsv not found for trial: {trial_name}")
-            return []
-
-        df = pd.read_csv(group_file, sep='\t')
-        # Normalize column names
-        df.columns = df.columns.str.strip().str.lower()
-        # Find the correct columns
-        label_col = None
-        for candidate in ['group', 'kslabel', 'ks_label']:
-            if candidate in df.columns:
-                label_col = candidate
-                break
-        if label_col is None:
-            print(f"[ERROR] No label column found in {group_file}. Columns are: {df.columns.tolist()}")
-            return []
-        cluster_col = None
-        for candidate in ['cluster_id', 'clusterid', 'cluster']:
-            if candidate in df.columns:
-                cluster_col = candidate
-                break
-        if cluster_col is None:
-            print(f"[ERROR] No cluster_id column found in {group_file}. Columns are: {df.columns.tolist()}")
-            return []
-        # Filter for 'mua' clusters (case-insensitive, strip whitespace)
-        mua_clusters = df[df[label_col].str.strip().str.lower() == 'mua'][cluster_col].tolist()
-        return mua_clusters
+        return self.get_clusters_by_labels(trial_name, 'mua')
 
 
 class RatGroup:

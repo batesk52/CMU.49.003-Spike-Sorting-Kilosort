@@ -39,108 +39,346 @@ class MultiRatVonFreyAnalysis:
         self.ks_wrappers = ks_wrappers  # dict: rat ID -> Kilosort_wrapper
         self.analysis_results = {}
 
+    def build_cluster_label_dict_from_xlsx(self, cluster_labels_xlsx, cluster_labels, combined_results):
+        """
+        Build a mapping from trial name to allowed cluster IDs using the spreadsheet and the user's filter.
+        cluster_labels: can be a string, list, per-rat dict, or nested dict (same as before).
+        """
+        import pandas as pd
+        df = pd.read_excel(cluster_labels_xlsx)
+        df.columns = [col.strip() for col in df.columns]
+        # Build a mapping: {rat: {trial: {label: [clusters]}}}
+        label_map = {}
+        for _, row in df.iterrows():
+            rat = str(row['Rat'])
+            trial = str(row['Trial'])
+            label = str(row['Label']).strip().lower()
+            cluster = row['Cluster']
+            label_map.setdefault(rat, {}).setdefault(trial, {}).setdefault(label, []).append(cluster)
+        # Now, for each trial in combined_results, get the allowed clusters
+        cluster_dict = {}
+        for trial_key in combined_results.keys():
+            rat_id = trial_key.split('_')[0]
+            trial_name = '_'.join(trial_key.split('_')[1:])
+            # Determine which labels to use for this trial
+            if isinstance(cluster_labels, dict):
+                # Per-rat or per-trial
+                if rat_id in cluster_labels:
+                    if isinstance(cluster_labels[rat_id], dict):
+                        # Per-trial
+                        labels = cluster_labels[rat_id].get(trial_name, cluster_labels[rat_id].get('default', []))
+                    else:
+                        labels = cluster_labels[rat_id]
+                else:
+                    labels = cluster_labels.get('default', [])
+            else:
+                labels = cluster_labels
+            # Normalize to list
+            if isinstance(labels, str):
+                labels = [labels]
+            labels = [str(l).strip().lower() for l in labels]
+            # Get clusters for these labels
+            clusters = []
+            for label in labels:
+                clusters += label_map.get(rat_id, {}).get(trial_name, {}).get(label, [])
+            cluster_dict[trial_key] = sorted(set(clusters))
+        return cluster_dict
+
     def analyze_all_trials(self, excel_parent_folder, **kwargs):
         """
-        For each rat, automatically load precomputed results from the Excel files if they exist,
-        otherwise run the analysis from raw data.
+        Aggregates Von Frey analysis across a group of rats.
         
         Parameters:
-          excel_parent_folder: str or Path; the parent folder under which each rat's folder is located.
-                               The method will look in: {excel_parent_folder}/{RatID}/tables
-                               for Excel files.
-          kwargs: additional parameters (e.g., subwindow_width, corr_threshold, fast_mode, skip_correlations, etc.) for analysis.
+        -----------
+        excel_parent_folder: str or Path; parent folder for cached results
+        cluster_labels: str, list, or dict; specifies which cluster labels to analyze:
+                       - str: single label (e.g., 'good')
+                       - list: multiple labels (e.g., ['good', 'mua'])
+                       - dict: {rat_id: labels} for per-rat customization
+                       - dict: {rat_id: {trial_name: labels}} for per-trial customization
+        cluster_labels_xlsx: str or Path, optional; path to spreadsheet for cluster label mapping
+        kwargs: additional parameters for the analysis
         
         Returns:
-          combined_results: dict keyed by "RatID_TrialName" containing the analysis results.
+        --------
+        combined_results: dict keyed by "RatID_TrialName"
+        combined_qst_notes: pandas.DataFrame with combined QST notes
         """
-        combined_results = {}
+        from pathlib import Path
+        import pandas as pd
+        excel_parent_folder = Path(excel_parent_folder)
         
-        # Extract optimization parameters and show what's being used
-        fast_mode = kwargs.get('fast_mode', False)
-        skip_correlations = kwargs.get('skip_correlations', False)
-        correlation_window_size = kwargs.get('correlation_window_size', None)
-        cluster_types = kwargs.get('cluster_types', 'good')
+        # Extract and validate parameters
+        cluster_labels = kwargs.pop('cluster_labels', 'good')
+        cluster_labels_xlsx = kwargs.pop('cluster_labels_xlsx', None)
+        fast_mode = kwargs.pop('fast_mode', False)
+        skip_correlations = kwargs.pop('skip_correlations', False)
+        correlation_window_size = kwargs.pop('correlation_window_size', None)
         
-        print(f"[INFO] Analysis settings:")
-        print(f"  - Cluster types: {cluster_types}")
+        print(f"\n[DEBUG] Starting analysis with settings:")
+        print(f"  - Cluster labels type: {type(cluster_labels)}")
+        print(f"  - Cluster labels value: {cluster_labels}")
         print(f"  - Fast mode: {fast_mode}")
         print(f"  - Skip correlations: {skip_correlations}")
-        if correlation_window_size:
-            print(f"  - Custom correlation window: {correlation_window_size}")
+        if cluster_labels_xlsx:
+            print(f"  - Using cluster_labels_xlsx: {cluster_labels_xlsx}")
         
+        combined_results = {}
+        combined_qst_notes = {}
+        
+        # If using spreadsheet, build mapping for all trials
+        cluster_dict_from_xlsx = None
+        if cluster_labels_xlsx is not None:
+            # We'll build a dummy combined_results for mapping (all possible trial keys)
+            all_trial_keys = {}
+            for rat_id, rat in self.rat_group.rats.items():
+                for trial in self.ks_wrappers[rat_id].kilosort_results.keys():
+                    key = f"{rat_id}_{trial}"
+                    all_trial_keys[key] = None
+            cluster_dict_from_xlsx = self.build_cluster_label_dict_from_xlsx(cluster_labels_xlsx, cluster_labels, all_trial_keys)
+        
+        # Process each rat
         for rat_id, rat in self.rat_group.rats.items():
-            print(f"\n[INFO] Processing rat: {rat_id}")
-            si = self.si_wrappers[rat_id]
-            ks = self.ks_wrappers[rat_id]
-            # Automatically decide: if the Excel files exist in the proper subfolder, load them.
-            # Pass good_clusters_by_trial if present in kwargs (for per-rat customization)
-            rat_kwargs = dict(kwargs)
-            if 'good_clusters_by_trial' in kwargs:
-                rat_kwargs['good_clusters_by_trial'] = kwargs['good_clusters_by_trial'].get(rat_id, None)
+            print(f"\n[DEBUG] Processing rat: {rat_id}")
             
-            # Ensure optimization parameters are explicitly passed
-            rat_kwargs['fast_mode'] = fast_mode
-            rat_kwargs['skip_correlations'] = skip_correlations
-            if correlation_window_size is not None:
-                rat_kwargs['correlation_window_size'] = correlation_window_size
+            # Prepare rat-specific arguments
+            rat_kwargs = kwargs.copy()
+            
+            # Handle cluster labels
+            if cluster_labels_xlsx is not None:
+                # Use spreadsheet mapping for this rat's trials
+                # Build a per-trial dict for this rat
+                per_trial_dict = {}
+                for trial in self.ks_wrappers[rat_id].kilosort_results.keys():
+                    key = f"{rat_id}_{trial}"
+                    per_trial_dict[trial] = cluster_dict_from_xlsx.get(key, [])
+                rat_kwargs['cluster_labels'] = per_trial_dict
+            else:
+                if isinstance(cluster_labels, dict):
+                    if rat_id in cluster_labels:
+                        if isinstance(cluster_labels[rat_id], dict):
+                            print(f"[DEBUG] Using per-trial labels for {rat_id}: {cluster_labels[rat_id]}")
+                            rat_kwargs['cluster_labels'] = cluster_labels[rat_id]
+                        else:
+                            print(f"[DEBUG] Using per-rat labels for {rat_id}: {cluster_labels[rat_id]}")
+                            rat_kwargs['cluster_labels'] = cluster_labels[rat_id]
+                    else:
+                        print(f"[DEBUG] Rat {rat_id} not found in labels dict, using default: 'good'")
+                        rat_kwargs['cluster_labels'] = 'good'
+                else:
+                    print(f"[DEBUG] Using global labels for {rat_id}: {cluster_labels}")
+                    rat_kwargs['cluster_labels'] = cluster_labels
+            
+            print(f"[DEBUG] Final kwargs for {rat_id}: {rat_kwargs}")
+            
+            # Get results for this rat
+            try:
+                print(f"[DEBUG] Getting von Frey analysis for {rat_id}")
+                results = rat.get_von_frey_analysis(
+                    self.si_wrappers[rat_id],
+                    self.ks_wrappers[rat_id],
+                    excel_parent_folder=excel_parent_folder,
+                    **rat_kwargs
+                )
                 
-            results = rat.get_von_frey_analysis(si, ks, excel_parent_folder=excel_parent_folder, **rat_kwargs)
-            if results is None:
+                print(f"[DEBUG] Results type for {rat_id}: {type(results)}")
+                if results:
+                    print(f"[DEBUG] Results keys for {rat_id}: {results.keys() if isinstance(results, dict) else 'Not a dict'}")
+                
+                # Add results to combined dictionary
+                if results:  # Only add if we have results
+                    for trial_name, trial_results in results.items():
+                        key = f"{rat_id}_{trial_name}"
+                        print(f"[DEBUG] Adding results for {key}")
+                        print(f"[DEBUG] Trial results type: {type(trial_results)}")
+                        print(f"[DEBUG] Trial results keys: {trial_results.keys() if isinstance(trial_results, dict) else 'Not a dict'}")
+                        combined_results[key] = trial_results
+                        print(f"[DEBUG] Added results for {key}")
+                
+            except Exception as e:
+                print(f"[ERROR] Failed to process rat {rat_id}: {str(e)}")
+                print(f"[ERROR] Error type: {type(e)}")
+                import traceback
+                print(f"[ERROR] Traceback: {traceback.format_exc()}")
                 continue
-            for trial_name, res in results.items():
-                combined_key = f"{rat_id}_{trial_name}"
-                combined_results[combined_key] = res
-        self.analysis_results = combined_results
-        return combined_results
+        
+        print(f"\n[DEBUG] Final combined results: {len(combined_results)} trials")
+        
+        # Create combined QST notes
+        def make_unique_cols(df):
+            new_cols = []
+            seen = {}
+            for col in df.columns:
+                if col in seen:
+                    seen[col] += 1
+                    new_cols.append(f"{col}_{seen[col]}")
+                else:
+                    seen[col] = 0
+                    new_cols.append(col)
+            df.columns = new_cols
+            return df
+
+        dfs = []
+        for rat_id, rat in self.rat_group.rats.items():
+            if hasattr(rat, 'qst_trial_notes') and rat.qst_trial_notes is not None:
+                print(f"\n[DEBUG] Processing QST notes for rat {rat_id}")
+                print(f"[DEBUG] QST notes type: {type(rat.qst_trial_notes)}")
+                print(f"[DEBUG] QST notes shape: {rat.qst_trial_notes.shape if hasattr(rat.qst_trial_notes, 'shape') else 'No shape'}")
+                print(f"[DEBUG] QST notes columns: {rat.qst_trial_notes.columns if hasattr(rat.qst_trial_notes, 'columns') else 'No columns'}")
+                print(f"[DEBUG] QST notes index: {rat.qst_trial_notes.index if hasattr(rat.qst_trial_notes, 'index') else 'No index'}")
+                
+                try:
+                    df = make_unique_cols(rat.qst_trial_notes.copy())
+                    print(f"[DEBUG] After make_unique_cols - columns: {df.columns}")
+                    print(f"[DEBUG] After make_unique_cols - index: {df.index}")
+                    
+                    df['Rat ID'] = rat_id
+                    print(f"[DEBUG] After adding Rat ID - columns: {df.columns}")
+                    
+                    # Handle case where Trial Number is the index
+                    if df.index.name == "Trial Number":
+                        print(f"[DEBUG] Trial Number is index name")
+                        # Check if Trial Number already exists as a column
+                        if "Trial Number" in df.columns:
+                            print(f"[DEBUG] Dropping existing Trial Number column")
+                            df = df.drop(columns=["Trial Number"])
+                        print(f"[DEBUG] Resetting index")
+                        df = df.reset_index()
+                        print(f"[DEBUG] After reset_index - columns: {df.columns}")
+                    
+                    print(f"[DEBUG] Creating combined Trial Number")
+                    df["Trial Number"] = rat_id + "_" + df["Trial Number"].astype(str)
+                    print(f"[DEBUG] Final columns: {df.columns}")
+                    dfs.append(df)
+                except Exception as e:
+                    print(f"[ERROR] Failed to process QST notes for rat {rat_id}: {str(e)}")
+                    print(f"[ERROR] Error type: {type(e)}")
+                    import traceback
+                    print(f"[ERROR] Traceback: {traceback.format_exc()}")
+                    continue
+
+        if dfs:
+            combined_qst_notes = pd.concat(dfs, ignore_index=True)
+            # Only add Trial_ID if we have results
+            if combined_results:
+                # Create a mapping from trial numbers to trial IDs
+                trial_id_map = {}
+                for trial_id in combined_results.keys():
+                    # Extract the rat ID and trial number from the trial ID
+                    # Format: DW322_VF_1_240918_143256 -> DW322 and 1
+                    rat_id = trial_id.split('_')[0]
+                    trial_num = trial_id.split('_')[2]  # Get the trial number part
+                    
+                    # Find matching row in QST notes
+                    # Match both rat ID and trial number (which is in format DW322_1)
+                    mask = (combined_qst_notes['Rat ID'] == rat_id) & \
+                          (combined_qst_notes['Trial Number'].str.endswith(f'_{trial_num}'))
+                    
+                    if mask.any():
+                        trial_id_map[trial_id] = mask
+                        print(f"[DEBUG] Matched trial {trial_id} to QST notes")
+                    else:
+                        print(f"[DEBUG] No match found for trial {trial_id}")
+                
+                # Add Trial_ID column with NaN for unmatched trials
+                combined_qst_notes['Trial_ID'] = None
+                for trial_id, mask in trial_id_map.items():
+                    combined_qst_notes.loc[mask, 'Trial_ID'] = trial_id
+                
+            print(f"[DEBUG] Created combined QST notes with {len(combined_qst_notes)} rows")
+            print(f"[DEBUG] Number of trials with IDs: {combined_qst_notes['Trial_ID'].notna().sum() if 'Trial_ID' in combined_qst_notes.columns else 0}")
+            print(f"[DEBUG] Matched trials: {list(trial_id_map.keys()) if 'trial_id_map' in locals() else []}")
+        else:
+            print("[WARNING] No QST notes found for any rats")
+            combined_qst_notes = pd.DataFrame()
+
+        return combined_results, combined_qst_notes
 
 
 
 class VonFreyAnalysis:
     def __init__(self, rat_instance, spikeinterface_instance, kilosort_instance):
         """
-        Initialize the VonFreyAnalysis class with references to the Rat, SpikeInterface_wrapper, and Kilosort_wrapper instances.
+        Initialize VonFreyAnalysis with rat instance and data wrappers.
         """
         self.rat = rat_instance
-        self.signals = spikeinterface_instance
-        self.spikes = kilosort_instance
+        self.si_wrapper = spikeinterface_instance
+        self.ks_wrapper = kilosort_instance
         self.von_frey_time_windows = {}  # {trial: intervals dict}
         self.cluster_firing_rates = {}   # {trial: firing rate DataFrame}
-        self.windowed_results = {}       # {trial: {'avg_voltage_df':..., 'firing_rates_df':...}}
-        self.inv_isi_correlations = {}   # {trial: {cluster_id: correlation}}
-        self.inv_isi_traces = {}         # {trial: {cluster_id: np.ndarray}}
-
+        self.inv_isi_correlations = {}   # {trial: {cluster: correlation}}
+        self.inv_isi_traces = {}         # {trial: {cluster: trace}}
+        self.voltage_data = {}           # {trial: voltage DataFrame}
+        
     def _smooth_moving_average(self, signal, window_size=15000, causal=False, use_fast_method=True):
         """
-        Smooth 'signal' by convolving with a ones kernel of size 'window_size'.
-        If causal=True, only past values are used (moving average up to current point).
-        If causal=False, uses centered window (default, as before).
-        If use_fast_method=True, uses scipy for faster computation on large signals.
+        Optimized signal smoothing with multiple acceleration methods.
+        
+        Parameters:
+        -----------
+        signal : array-like
+            Input signal to smooth
+        window_size : int
+            Size of smoothing window in samples. Default is 15000.
+        causal : bool
+            If True, only use past values (causal filtering)
+        use_fast_method : bool
+            If True, use optimized methods for large signals
         """
-        if use_fast_method and len(signal) > 100000:  # Use faster method for large signals
+        signal = np.asarray(signal, dtype=np.float64)
+        
+        # For very small signals, use simple method
+        if len(signal) < window_size * 2:
+            kernel = np.ones(window_size) / window_size
+            if causal:
+                smoothed = np.convolve(signal, kernel, mode='full')[:len(signal)]
+            else:
+                smoothed = np.convolve(signal, kernel, mode='same')
+            return smoothed
+        
+        # Use optimized methods for larger signals
+        if use_fast_method:
             try:
-                from scipy import ndimage
                 if causal:
-                    # For causal, we'll use a simple cumulative approach which is much faster
+                    # Vectorized cumulative approach - much faster than convolution
                     padded = np.concatenate([np.zeros(window_size-1), signal])
                     cumsum = np.cumsum(padded)
                     smoothed = (cumsum[window_size-1:] - np.concatenate([np.zeros(1), cumsum[:-window_size]])) / window_size
                     return smoothed[:len(signal)]
                 else:
-                    # Use scipy's uniform filter which is much faster than np.convolve
-                    smoothed = ndimage.uniform_filter1d(signal.astype(np.float64), size=window_size, mode='constant')
-                    return smoothed
-            except ImportError:
-                print("Warning: scipy not available, falling back to numpy method")
+                    # Try scipy's optimized uniform filter first
+                    try:
+                        from scipy import ndimage
+                        return ndimage.uniform_filter1d(signal, size=window_size, mode='constant')
+                    except ImportError:
+                        # Fallback to optimized numpy approach using FFT for large signals
+                        if len(signal) > 50000:
+                            return self._fft_smooth(signal, window_size)
+            except Exception as e:
+                print(f"Warning: Fast smoothing failed ({e}), using fallback method")
         
-        # Original numpy method (fallback)
+        # Fallback method
         kernel = np.ones(window_size) / window_size
         if causal:
-            # Causal: only past and current values
             smoothed = np.convolve(signal, kernel, mode='full')[:len(signal)]
         else:
-            # Centered (default)
             smoothed = np.convolve(signal, kernel, mode='same')
         return smoothed
+    
+    def _fft_smooth(self, signal, window_size):
+        """
+        FFT-based convolution for very large signals (faster than direct convolution).
+        """
+        kernel = np.ones(window_size) / window_size
+        # Pad to avoid edge effects
+        pad_width = window_size // 2
+        padded_signal = np.pad(signal, pad_width, mode='edge')
+        
+        # FFT convolution
+        smoothed_padded = np.convolve(padded_signal, kernel, mode='same')
+        
+        # Remove padding
+        return smoothed_padded[pad_width:-pad_width]
 
     def extract_von_frey_windows(self, TRIAL_NAMES=None, amplitude_threshold=225000, 
                                  start_buffer=0.001, end_buffer=0.001):
@@ -151,10 +389,10 @@ class VonFreyAnalysis:
         if TRIAL_NAMES is not None:
             trial_list = TRIAL_NAMES
         else:
-            if not self.spikes.kilosort_results:
+            if not self.ks_wrapper.kilosort_results:
                 print("No kilosort results found. Please run Kilosort or load results first.")
                 return {}
-            trial_list = list(self.spikes.kilosort_results.keys())
+            trial_list = list(self.ks_wrapper.kilosort_results.keys())
 
         for trial_name in trial_list:
             intervals = self._extract_von_frey_windows_single_trial(trial_name, amplitude_threshold, start_buffer, end_buffer)
@@ -220,10 +458,10 @@ class VonFreyAnalysis:
         (Deprecated?) Compute average firing rates of units during Von Frey stimulus windows.
         """
         if TRIAL_NAMES is None:
-            if not self.spikes.kilosort_results:
+            if not self.ks_wrapper.kilosort_results:
                 print("No kilosort results found. Please run Kilosort or load results first.")
                 return {}
-            trial_list = list(self.spikes.kilosort_results.keys())
+            trial_list = list(self.ks_wrapper.kilosort_results.keys())
         else:
             trial_list = TRIAL_NAMES
 
@@ -232,7 +470,7 @@ class VonFreyAnalysis:
                                                        start_buffer=start_buffer,
                                                        end_buffer=end_buffer)
         for trial_name in trial_list:
-            if trial_name not in self.spikes.kilosort_results or trial_name not in intervals_dict:
+            if trial_name not in self.ks_wrapper.kilosort_results or trial_name not in intervals_dict:
                 print(f"Skipping trial '{trial_name}' due to missing data.")
                 continue
 
@@ -242,18 +480,18 @@ class VonFreyAnalysis:
             firing_rates_intervals = []
             for start, end in zip(adjusted_start_times, adjusted_end_times):
                 window_duration = end - start
-                indices = np.where((self.spikes.kilosort_results[trial_name]['spike_times'] / 
-                                    self.spikes.kilosort_results[trial_name]['ops']['fs'] >= start) &
-                                   (self.spikes.kilosort_results[trial_name]['spike_times'] / 
-                                    self.spikes.kilosort_results[trial_name]['ops']['fs'] < end))[0]
-                clusters_in_window = self.spikes.kilosort_results[trial_name]['spike_clusters'][indices]
+                indices = np.where((self.ks_wrapper.kilosort_results[trial_name]['spike_times'] / 
+                                    self.ks_wrapper.kilosort_results[trial_name]['ops']['fs'] >= start) &
+                                   (self.ks_wrapper.kilosort_results[trial_name]['spike_times'] / 
+                                    self.ks_wrapper.kilosort_results[trial_name]['ops']['fs'] < end))[0]
+                clusters_in_window = self.ks_wrapper.kilosort_results[trial_name]['spike_clusters'][indices]
                 cluster_counts = Counter(clusters_in_window)
-                all_clusters = np.unique(self.spikes.kilosort_results[trial_name]['spike_clusters'])
+                all_clusters = np.unique(self.ks_wrapper.kilosort_results[trial_name]['spike_clusters'])
                 firing_rates = {cluster: cluster_counts.get(cluster, 0) / window_duration for cluster in all_clusters}
                 firing_rates_intervals.append(firing_rates)
             firing_rates_df = pd.DataFrame(firing_rates_intervals).fillna(0)
             self.cluster_firing_rates[trial_name] = firing_rates_df
-            pd.DataFrame(firing_rates_df).to_excel(Path(self.spikes.SAVE_DIRECTORY) / "tables" / f"{trial_name}_cluster_firing_rates.xlsx")
+            pd.DataFrame(firing_rates_df).to_excel(Path(self.ks_wrapper.SAVE_DIRECTORY) / "tables" / f"{trial_name}_cluster_firing_rates.xlsx")
         return self.cluster_firing_rates
 
     def subdivide_intervals(self, intervals_dict, subwindow_width):
@@ -283,53 +521,102 @@ class VonFreyAnalysis:
     def compute_average_von_frey_voltage(self, trial_name, subwindow_start_times, subwindow_end_times):
         """
         Compute the average Von Frey voltage for each sub-window in a trial.
+        
+        Parameters:
+        -----------
+        trial_name : str
+            Name of the trial to analyze
+        subwindow_start_times : array-like
+            Start times of subwindows in seconds
+        subwindow_end_times : array-like
+            End times of subwindows in seconds
+            
+        Returns:
+        --------
+        pd.DataFrame
+            DataFrame containing the average voltage for each subwindow
         """
-        if trial_name not in self.signals.data.analog_data:
+        if trial_name not in self.si_wrapper.data.analog_data:
             print(f"Trial '{trial_name}' not found in analog_data.")
-            return pd.DataFrame()
-        recording = self.signals.data.analog_data[trial_name]
+            return pd.DataFrame({'avg_voltage': []}, index=range(len(subwindow_start_times)))
+            
+        recording = self.si_wrapper.data.analog_data[trial_name]
         sampling_rate = recording.get_sampling_frequency()
+        
         if 'ANALOG-IN-2' not in recording.get_channel_ids():
             print(f"ANALOG-IN-2 not found in trial '{trial_name}'.")
-            return pd.DataFrame()
+            return pd.DataFrame({'avg_voltage': []}, index=range(len(subwindow_start_times)))
+            
         von_frey_data = recording.get_traces(channel_ids=['ANALOG-IN-2'], return_scaled=True).flatten()
-        avg_voltages = [np.mean(von_frey_data[int(start * sampling_rate):int(end * sampling_rate)]) 
-                        if end > start else np.nan 
-                        for start, end in zip(subwindow_start_times, subwindow_end_times)]
-        return pd.DataFrame({'avg_voltage': avg_voltages})
+        avg_voltages = []
+        
+        for start, end in zip(subwindow_start_times, subwindow_end_times):
+            if end > start:
+                start_idx = int(start * sampling_rate)
+                end_idx = int(end * sampling_rate)
+                avg_voltage = np.mean(von_frey_data[start_idx:end_idx])
+                avg_voltages.append(avg_voltage)
+            else:
+                avg_voltages.append(np.nan)
+                
+        return pd.DataFrame({'avg_voltage': avg_voltages}, index=range(len(avg_voltages)))
 
     def compute_unit_firing_rates_for_subwindows(self, trial_name, subwindow_start_times, subwindow_end_times, good_clusters=None):
         """
-        Compute firing rates for every cluster during each sub-window in a trial.
-        This version uses vectorized np.searchsorted to quickly count spikes per subwindow.
-        If good_clusters is provided, only those clusters are included.
+        Computes firing rates for each unit in each subwindow.
         """
-        if trial_name not in self.spikes.kilosort_results:
-            print(f"No kilosort results for trial '{trial_name}'.")
-            return pd.DataFrame()
-
-        kilosort_output = self.spikes.kilosort_results[trial_name]
-        st = kilosort_output['spike_times']    # spike times in samples
-        clu = kilosort_output['spike_clusters']  # cluster assignments
+        # Get spike times and clusters
+        kilosort_output = self.ks_wrapper.kilosort_results[trial_name]
+        spike_times = kilosort_output['spike_times']
+        clusters = kilosort_output['spike_clusters']
         fs = kilosort_output['ops']['fs']
-        spike_times_sec = st / fs
-        unique_clusters = np.unique(clu)
+        
+        if spike_times is None or clusters is None:
+            print(f"Could not get spike data for trial {trial_name}")
+            return pd.DataFrame()
+            
+        # Filter for good clusters if specified
         if good_clusters is not None:
-            unique_clusters = [c for c in unique_clusters if c in good_clusters]
-        n_windows = len(subwindow_start_times)
+            mask = np.isin(clusters, good_clusters)
+            spike_times = spike_times[mask]
+            clusters = clusters[mask]
+            
+        if len(spike_times) == 0:
+            print(f"No spikes found for trial {trial_name}")
+            return pd.DataFrame()
+            
+        # Convert times to samples
+        start_samples = np.array(subwindow_start_times) * fs
+        end_samples = np.array(subwindow_end_times) * fs
         
-        # Initialize a dictionary to hold firing rates (counts divided by window duration)
-        firing_rates = {}
-        durations = subwindow_end_times - subwindow_start_times  # vector of window durations
+        # Initialize results
+        unique_clusters = np.unique(clusters)
+        firing_rates = []
         
-        for cluster in unique_clusters:
-            spikes_cluster = spike_times_sec[clu == cluster]
-            # Use vectorized searchsorted to count spikes in each subwindow
-            counts = np.searchsorted(spikes_cluster, subwindow_end_times) - np.searchsorted(spikes_cluster, subwindow_start_times)
-            firing_rates[cluster] = counts / durations
+        # Process each cluster
+        for cluster_id in unique_clusters:
+            # Get spikes for this cluster
+            cluster_spikes = spike_times[clusters == cluster_id]
+            
+            # Compute firing rate for each subwindow
+            rates = []
+            for start, end in zip(start_samples, end_samples):
+                # Count spikes in window
+                n_spikes = np.sum((cluster_spikes >= start) & (cluster_spikes <= end))
+                # Convert to Hz
+                duration = (end - start) / fs
+                rate = n_spikes / duration if duration > 0 else 0
+                rates.append(rate)
+                
+            firing_rates.append(rates)
+            
+        # Create DataFrame with string cluster IDs as column names
+        df = pd.DataFrame(
+            np.array(firing_rates).T,
+            columns=[f'cluster_{str(cid)}' for cid in unique_clusters]
+        )
         
-        firing_rates_df = pd.DataFrame(firing_rates).fillna(0)
-        return firing_rates_df
+        return df
 
     def compute_unit_firing_rates_for_subwindows_modular(self, spike_times_sec, clusters, subwindow_start_times, subwindow_end_times):
         """
@@ -346,73 +633,113 @@ class VonFreyAnalysis:
         return firing_rates_df
 
     def compute_inv_isi_correlation(self, trial_name, window_size=15000, good_clusters=None):
-        """s
-        Compute the correlation between a smoothed inverse-ISI trace per cluster and the Von Frey signal.
-        If good_clusters is provided, only those clusters are included.
         """
-        if trial_name not in self.spikes.kilosort_results:
-            print(f"[WARNING] Kilosort results not found for trial: {trial_name}")
-            return {}, {}
-
-        kilosort_output = self.spikes.kilosort_results[trial_name]
-        st = kilosort_output["spike_times"]
-        clu = kilosort_output["spike_clusters"]
-        fs  = kilosort_output["ops"]["fs"]
-
-        recording = self.rat.analog_data.get(trial_name, None)
-        if recording is None:
-            print(f"[WARNING] No recording found for trial: {trial_name}")
-            return {}, {}
-        if "ANALOG-IN-2" not in recording.get_channel_ids():
-            print(f"[WARNING] Channel 'ANALOG-IN-2' not found for trial: {trial_name}")
-            return {}, {}
-
-        von_frey_data = recording.get_traces(channel_ids=["ANALOG-IN-2"], return_scaled=True).flatten()
-        vf_initial = von_frey_data[:1050000]
-        vf_end = von_frey_data[-1050000:]
-        von_frey_data = np.concatenate([vf_initial, vf_end])
-        N = len(von_frey_data)
-
-        max_spike_time = st.max()
-        if max_spike_time >= N:
-            print("[WARNING] Some spikes occur beyond the length of the Von Frey data. "
-                  f"max spike time = {max_spike_time}, length of VF data = {N}.")
-
-        unique_clusters = np.unique(clu)
+        Computes correlation between inverse ISI and Von Frey signal.
+        """
+        print(f"\n[DEBUG] Computing correlations for trial: {trial_name}")
+        print(f"[DEBUG] Window size: {window_size}")
+        print(f"[DEBUG] Good clusters: {good_clusters}")
+        
+        # Ensure we have a valid window size
+        if window_size is None:
+            window_size = 15000  # Default window size
+            print(f"[DEBUG] Using default window size: {window_size}")
+        
+        # Get spike times and clusters
+        kilosort_output = self.ks_wrapper.kilosort_results[trial_name]
+        spike_times = kilosort_output['spike_times']
+        clusters = kilosort_output['spike_clusters']
+        fs = kilosort_output['ops']['fs']
+        
+        print(f"[DEBUG] Total spikes: {len(spike_times)}")
+        print(f"[DEBUG] Unique clusters before filtering: {np.unique(clusters)}")
+        print(f"[DEBUG] Sampling rate: {fs} Hz")
+        
+        if spike_times is None or clusters is None:
+            print(f"Could not get spike data for trial {trial_name}")
+            return None, None
+            
+        # Filter for good clusters if specified
         if good_clusters is not None:
-            unique_clusters = [c for c in unique_clusters if c in good_clusters]
+            mask = np.isin(clusters, good_clusters)
+            spike_times = spike_times[mask]
+            clusters = clusters[mask]
+            print(f"[DEBUG] Spikes after filtering: {len(spike_times)}")
+            print(f"[DEBUG] Unique clusters after filtering: {np.unique(clusters)}")
+            
+        if len(spike_times) == 0:
+            print(f"No spikes found for trial {trial_name}")
+            return None, None
+            
+        # Get Von Frey data
+        if trial_name not in self.si_wrapper.data.analog_data:
+            print(f"Trial '{trial_name}' not found in analog_data.")
+            return None, None
+            
+        recording = self.si_wrapper.data.analog_data[trial_name]
+        if "ANALOG-IN-2" not in recording.get_channel_ids():
+            print(f"Channel 'ANALOG-IN-2' not found for trial {trial_name}")
+            return None, None
+            
+        von_frey_data = recording.get_traces(channel_ids=["ANALOG-IN-2"], return_scaled=True).flatten()
+        print(f"[DEBUG] Von Frey data length: {len(von_frey_data)} samples")
+        
+        # Compute correlations for each cluster
         correlations = {}
         inv_isi_traces = {}
-
-        for cluster in unique_clusters:
-            cluster_spike_times = np.sort(st[clu == cluster])
-            inv_isi_trace = np.zeros(N, dtype=float)
-            if len(cluster_spike_times) < 2:
-                correlations[cluster] = 0.0
-                inv_isi_traces[cluster] = inv_isi_trace
-                continue
-
-            for i in range(len(cluster_spike_times) - 1):
-                s_k = cluster_spike_times[i]
-                s_next = cluster_spike_times[i + 1]
-                if s_k >= N:
-                    break
-                if s_next > N:
-                    s_next = N
-                isi = s_next - s_k
-                if isi == 0:
-                    isi = 1
-                inv_isi_trace[s_k:s_next] = 1.0 / isi
-
-            inv_isi_trace_smoothed = self._smooth_moving_average(inv_isi_trace, window_size=window_size)
-            std_inv = np.std(inv_isi_trace_smoothed)
-            std_vf = np.std(von_frey_data)
-            corr_val = 0.0 if std_inv == 0 or std_vf == 0 else np.corrcoef(inv_isi_trace_smoothed, von_frey_data)[0, 1]
-            correlations[cluster] = corr_val
-            inv_isi_traces[cluster] = inv_isi_trace_smoothed
-
-        self.inv_isi_correlations[trial_name] = correlations
-        self.inv_isi_traces[trial_name] = inv_isi_traces
+        
+        for cluster_id in np.unique(clusters):
+            print(f"\n[DEBUG] Processing cluster {cluster_id}")
+            
+            # Get spikes for this cluster
+            cluster_spikes = spike_times[clusters == cluster_id]
+            print(f"[DEBUG] Number of spikes for cluster {cluster_id}: {len(cluster_spikes)}")
+            print(f"[DEBUG] Spike times range: {cluster_spikes.min():.2f} to {cluster_spikes.max():.2f}")
+            
+            # Convert spike times to seconds if they're in samples
+            if np.max(cluster_spikes) > 1000:  # crude check: likely in samples
+                print(f"[DEBUG] Converting spike times from samples to seconds")
+                cluster_spikes = cluster_spikes / fs
+                print(f"[DEBUG] Converted range: {cluster_spikes.min():.2f} to {cluster_spikes.max():.2f} seconds")
+            
+            # Compute inverse ISI
+            isi = np.diff(cluster_spikes)
+            inv_isi = 1 / (isi + 1e-10)  # Add small constant to avoid division by zero
+            print(f"[DEBUG] ISI range: {isi.min():.2f} to {isi.max():.2f} seconds")
+            print(f"[DEBUG] Inverse ISI range: {inv_isi.min():.2f} to {inv_isi.max():.2f} Hz")
+            
+            # Create time series
+            inv_isi_trace = np.zeros(len(von_frey_data))
+            
+            # Convert spike times to sample indices
+            spike_indices = (cluster_spikes[:-1] * fs).astype(int)
+            print(f"[DEBUG] Sample indices range: {spike_indices.min()} to {spike_indices.max()}")
+            
+            # Ensure indices are within bounds
+            valid_mask = (spike_indices >= 0) & (spike_indices < len(inv_isi_trace))
+            valid_indices = spike_indices[valid_mask]
+            valid_inv_isi = inv_isi[valid_mask]
+            
+            print(f"[DEBUG] Valid indices: {len(valid_indices)} out of {len(spike_indices)}")
+            if len(valid_indices) > 0:
+                print(f"[DEBUG] Valid indices range: {valid_indices.min()} to {valid_indices.max()}")
+            
+            # Fill the trace
+            inv_isi_trace[valid_indices] = valid_inv_isi
+            
+            # Smooth inverse ISI
+            smoothed_inv_isi = self._smooth_moving_average(inv_isi_trace, window_size)
+            
+            # Compute correlation
+            correlation = np.corrcoef(smoothed_inv_isi, von_frey_data)[0, 1]
+            print(f"[DEBUG] Correlation for cluster {cluster_id}: {correlation:.3f}")
+            
+            # Store results with string cluster ID
+            cluster_key = f'cluster_{str(cluster_id)}'
+            correlations[cluster_key] = correlation
+            inv_isi_traces[cluster_key] = smoothed_inv_isi
+            
+        print(f"\n[DEBUG] Completed correlation computation for {len(correlations)} clusters")
         return correlations, inv_isi_traces
 
     def compute_inv_isi_correlation_modular(self, spike_times, clusters, fs, von_frey_data, window_size=15000, time_window=None, vf_magnitude=225000):
@@ -535,8 +862,8 @@ class VonFreyAnalysis:
         start_times = intervals['adjusted_start_times']
         end_times = intervals['adjusted_end_times']
         fs = N / (t[-1] if t[-1] > 0 else 1)
-        if hasattr(self, 'spikes') and hasattr(self.spikes, 'kilosort_results') and trial_name in self.spikes.kilosort_results:
-            fs = self.spikes.kilosort_results[trial_name]['ops']['fs']
+        if hasattr(self, 'ks_wrapper') and hasattr(self.ks_wrapper, 'kilosort_results') and trial_name in self.ks_wrapper.kilosort_results:
+            fs = self.ks_wrapper.kilosort_results[trial_name]['ops']['fs']
         windowed_corrs = []
         for i, (start, end) in enumerate(zip(start_times, end_times)):
             start_idx_w = int(start * fs)
@@ -575,107 +902,137 @@ class VonFreyAnalysis:
         plt.show()
 
     def analyze_subwindows(self, TRIAL_NAMES=None, amplitude_threshold=225000, start_buffer=0.001, 
-                           end_buffer=0.001, subwindow_width=0.5, corr_threshold=0.01, good_clusters_by_trial=None,
-                           fast_mode=False, skip_correlations=False, correlation_window_size=None):
+                          end_buffer=0.001, subwindow_width=0.5, corr_threshold=0.01, good_clusters_by_trial=None,
+                          fast_mode=False, skip_correlations=False, correlation_window_size=15000):
         """
-        Analyze Von Frey subwindows with optional performance optimizations.
-        
-        Parameters:
-        -----------
-        fast_mode : bool, default False
-            If True, automatically optimizes parameters for large cluster counts
-        skip_correlations : bool, default False
-            If True, skips inverse ISI correlation computation (much faster)
-        correlation_window_size : int, optional
-            Custom window size for correlation smoothing. If None, uses 15000 (or 5000 in fast_mode)
+        Analyze von Frey trials by subdividing them into smaller windows.
         """
         if TRIAL_NAMES is None:
-            TRIAL_NAMES = list(self.spikes.kilosort_results.keys())
-
-        intervals_dict = self.extract_von_frey_windows(TRIAL_NAMES=TRIAL_NAMES,
-                                                         amplitude_threshold=amplitude_threshold,
-                                                         start_buffer=start_buffer,
-                                                         end_buffer=end_buffer)
-        if not intervals_dict:
-            print("No intervals extracted.")
-            return {}
-
-        subwindows_dict = self.subdivide_intervals(intervals_dict, subwindow_width=subwindow_width)
-
-        for trial_name in subwindows_dict:
-            subwindow_starts = subwindows_dict[trial_name]['subwindow_start_times']
-            subwindow_ends = subwindows_dict[trial_name]['subwindow_end_times']
-
-            avg_voltage_df = self.compute_average_von_frey_voltage(trial_name, subwindow_starts, subwindow_ends)
-            groups = ["pre-stim" if start < 35 else "post-stim" for start in subwindow_starts]
-            avg_voltage_df.insert(0, 'group', groups)
+            TRIAL_NAMES = list(self.ks_wrapper.kilosort_results.keys())
+            
+        results = {}
+        for trial_name in TRIAL_NAMES:
+            print(f"\nProcessing trial: {trial_name}")
+            
+            # Get von Frey windows
+            windows = self.extract_von_frey_windows([trial_name], amplitude_threshold=amplitude_threshold,
+                                                  start_buffer=start_buffer, end_buffer=end_buffer)
+            if not windows:
+                print(f"No valid von Frey windows found for {trial_name}. Skipping...")
+                continue
+                
+            # Subdivide windows
+            subwindows = self.subdivide_intervals(windows, subwindow_width)
+            if not subwindows:
+                print(f"No valid subwindows created for {trial_name}. Skipping...")
+                continue
+                
+            # Print subwindow structure for debugging
+            print(f"Subwindow structure: {subwindows}")
+            
+            # Get the trial's subwindows
+            trial_subwindows = subwindows.get(trial_name)
+            if not trial_subwindows:
+                print(f"No subwindows found for trial {trial_name}. Skipping...")
+                continue
+                
+            # Get good clusters for this trial
             good_clusters = None
-            if good_clusters_by_trial is not None and trial_name in good_clusters_by_trial:
-                good_clusters = good_clusters_by_trial[trial_name]
-            firing_rates_df = self.compute_unit_firing_rates_for_subwindows(trial_name, subwindow_starts, subwindow_ends, good_clusters=good_clusters)
-
-            # Ensure 'group' is the first column before saving
-            if 'group' not in firing_rates_df.columns:
-                firing_rates_df.insert(0, 'group', groups)
-            else:
-                # Move 'group' to the first column if it's not already
-                cols = ['group'] + [col for col in firing_rates_df.columns if col != 'group']
-                firing_rates_df = firing_rates_df[cols]
-
-            # Debug: print columns before saving
-            if list(firing_rates_df.columns) == ['group']:
-                print(f"[WARNING] Only 'group' column present in firing_rates_df for {trial_name}. No cluster columns will be saved!")
-            else:
-                if 'group' in firing_rates_df.columns:
-                    cluster_cols = firing_rates_df.columns.drop('group').tolist()
+            if good_clusters_by_trial is not None:
+                if isinstance(good_clusters_by_trial, dict):
+                    good_clusters = good_clusters_by_trial.get(trial_name, None)
                 else:
-                    cluster_cols = firing_rates_df.columns.tolist()
-                print(f"[INFO] Cluster columns present: {cluster_cols}")
-
-            # Apply performance optimizations based on cluster count and settings
-            n_clusters = len(cluster_cols) if 'cluster_cols' in locals() else 0
-            
-            # Auto-enable fast mode for large cluster counts
-            if n_clusters > 50 and not fast_mode:
-                print(f"[INFO] Large number of clusters ({n_clusters}) detected. Consider using fast_mode=True for better performance.")
-            
-            # Set correlation window size based on mode
-            if correlation_window_size is None:
-                corr_window_size = 5000 if fast_mode else 15000
+                    good_clusters = good_clusters_by_trial
+                    
+            # Compute average von Frey voltage
+            avg_voltage_df = self.compute_average_von_frey_voltage(trial_name, 
+                                                                trial_subwindows['subwindow_start_times'],
+                                                                trial_subwindows['subwindow_end_times'])
+            if avg_voltage_df is None or avg_voltage_df.empty:
+                print(f"Could not compute average von Frey voltage for {trial_name}. Skipping...")
+                continue
+                
+            # Ensure voltage DataFrame has required columns
+            if 'group' not in avg_voltage_df.columns:
+                # Assign group labels based on subwindow start time
+                subwindow_starts = trial_subwindows['subwindow_start_times']
+                group_labels = ['pre-stim' if t < 35 else 'post-stim' for t in subwindow_starts]
+                if len(group_labels) == len(avg_voltage_df):
+                    avg_voltage_df['group'] = group_labels
+                else:
+                    avg_voltage_df['group'] = range(len(avg_voltage_df))
+            if 'avg_voltage' not in avg_voltage_df.columns:
+                print(f"'avg_voltage' column missing in voltage DataFrame for {trial_name}. Skipping...")
+                continue
+                
+            # Compute firing rates
+            if fast_mode:
+                firing_rates_df = self.compute_unit_firing_rates_for_subwindows_modular(
+                    self.rat.spikeinterface_wrapper.get_spike_times(trial_name),
+                    self.rat.spikeinterface_wrapper.get_clusters(trial_name),
+                    trial_subwindows['subwindow_start_times'],
+                    trial_subwindows['subwindow_end_times']
+                )
             else:
-                corr_window_size = correlation_window_size
+                firing_rates_df = self.compute_unit_firing_rates_for_subwindows(
+                    trial_name,
+                    trial_subwindows['subwindow_start_times'],
+                    trial_subwindows['subwindow_end_times'],
+                    good_clusters=good_clusters
+                )
+                
+            if firing_rates_df is None or firing_rates_df.empty:
+                print(f"Could not compute firing rates for {trial_name}. Skipping...")
+                continue
+                
+            # Ensure firing rates DataFrame has required columns
+            if 'group' not in firing_rates_df.columns:
+                # Assign group labels based on subwindow start time
+                subwindow_starts = trial_subwindows['subwindow_start_times']
+                group_labels = ['pre-stim' if t < 35 else 'post-stim' for t in subwindow_starts]
+                if len(group_labels) == len(firing_rates_df):
+                    firing_rates_df['group'] = group_labels
+                else:
+                    firing_rates_df['group'] = range(len(firing_rates_df))
             
-            # Compute correlations (unless skipped)
-            if skip_correlations:
-                print(f"[INFO] Skipping correlation computation for {trial_name} (skip_correlations=True)")
-                correlations = {}
-            else:
-                if fast_mode and n_clusters > 30:
-                    print(f"[INFO] Computing correlations for {n_clusters} clusters with fast mode (window_size={corr_window_size})...")
-                correlations, _ = self.compute_inv_isi_correlation(trial_name, window_size=corr_window_size, good_clusters=good_clusters)
+            # Compute correlations
+            correlations = {}
+            inv_isi_traces = {}
+            if not skip_correlations:
+                print(f"Computing correlations for {trial_name}...")
+                if fast_mode:
+                    correlations, inv_isi_traces = self.compute_inv_isi_correlation_modular(
+                        self.rat.spikeinterface_wrapper.get_spike_times(trial_name),
+                        self.rat.spikeinterface_wrapper.get_clusters(trial_name),
+                        self.rat.spikeinterface_wrapper.get_sampling_rate(),
+                        self.rat.get_von_frey_data(trial_name),
+                        window_size=correlation_window_size
+                    )
+                else:
+                    correlations, inv_isi_traces = self.compute_inv_isi_correlation(
+                        trial_name,
+                        window_size=correlation_window_size,
+                        good_clusters=good_clusters
+                    )
+                    
+                if correlations:
+                    print(f"Found correlations for clusters: {list(correlations.keys())}")
+                    for cluster, corr in correlations.items():
+                        print(f"Cluster {cluster}: {corr:.3f}")
+                else:
+                    print(f"No correlations computed for {trial_name}")
+                    
+            # Store results
+            results[trial_name] = {
+                'windows': windows,
+                'subwindows': trial_subwindows,
+                'voltage': avg_voltage_df,
+                'firing_rates': firing_rates_df,
+                'correlations': correlations,
+                'inv_isi_traces': inv_isi_traces
+            }
             
-            if correlations:
-                corr_row = pd.DataFrame({cluster: [corr_val] for cluster, corr_val in correlations.items()},
-                                        index=['correlation'])
-                is_corr_row = pd.DataFrame({cluster: [abs(corr_val) >= corr_threshold] for cluster, corr_val in correlations.items()},
-                                           index=['is_correlated'])
-                firing_rates_df = pd.concat([firing_rates_df, corr_row, is_corr_row], axis=0)
-            else:
-                if not skip_correlations:
-                    print(f"No correlations computed for trial '{trial_name}' or no clusters found.")
-                # Add empty correlation rows when skipped
-                if skip_correlations and n_clusters > 0:
-                    empty_corr = pd.DataFrame({col: [np.nan] for col in cluster_cols}, index=['correlation'])
-                    empty_is_corr = pd.DataFrame({col: [False] for col in cluster_cols}, index=['is_correlated'])
-                    firing_rates_df = pd.concat([firing_rates_df, empty_corr, empty_is_corr], axis=0)
-
-            tables_dir = Path(self.spikes.SAVE_DIRECTORY) / "tables"
-            tables_dir.mkdir(parents=True, exist_ok=True)
-            avg_voltage_df.to_excel(tables_dir / f"{trial_name}_average_vf_voltage_windowed.xlsx", index=False)
-            firing_rates_df.to_excel(tables_dir / f"{trial_name}_cluster_firing_rates_windowed.xlsx")
-            self.windowed_results[trial_name] = {'voltage_df': avg_voltage_df, 'firing_df': firing_rates_df}
-
-        return self.windowed_results
+        return results
 
     def psth(self, spike_times, event_onsets, window=(-1, 3), bin_ms=50, fs=30000):
         import numpy as np
@@ -718,17 +1075,36 @@ class VonFreyAnalysis:
         is_resp = max_run >= N
         return is_resp, real_psth, threshold, t_centers, above
 
-    def analyze_trial_clusters(self, rat_id, trial_name=None, plot_results=True, save_plots=True, psth_responsive=None):    
+    def analyze_trial_clusters(self, rat_id, trial_name=None, plot_results=True, save_plots=True, psth_responsive=None, cluster_labels=None):
         """
-        Performs comprehensive analysis of spike data, waveforms, and von Frey correlations for all good clusters in a trial.
+        Performs comprehensive analysis of spike data, waveforms, and von Frey correlations for clusters in a trial.
         Now includes PSTH-based responsiveness detection for each cluster.
+        
+        Parameters:
+        -----------
+        rat_id : str
+            The rat ID.
+        trial_name : str, optional
+            The trial name to analyze. If None, all trials are analyzed.
+        plot_results : bool, default True
+            Whether to plot the results.
+        save_plots : bool, default True
+            Whether to save the plots.
+        psth_responsive : dict, optional
+            A dictionary mapping cluster IDs to boolean values indicating if the cluster is responsive.
+        cluster_labels : str, list, dict, or nested dict, optional
+            Cluster labels to include in analysis:
+            - str/list: same labels for all trials
+            - dict: {trial_name: labels} for per-trial specification
+            - nested dict: {rat_id: {trial_name: labels}} for per-trial specification
+            If None, defaults to 'good'.
         """
         from automations.plots import plot_raster, plot_waveform
         import matplotlib.pyplot as plt
         import numpy as np
         from pathlib import Path
         # Get the kilosort wrapper for this rat
-        ksw = self.spikes
+        ksw = self.ks_wrapper
         # Get list of trials to analyze
         if trial_name is not None:
             trial_list = [trial_name]
@@ -738,10 +1114,15 @@ class VonFreyAnalysis:
         for trial in trial_list:
             print(f"\nAnalyzing trial: {trial}")
             trial_results = {}
-            # Get good clusters
-            good_clusters = ksw.get_good_clusters(trial)
+            # Determine labels for this trial
+            if isinstance(cluster_labels, dict):
+                trial_labels = cluster_labels.get(trial, 'good')
+            else:
+                trial_labels = cluster_labels if cluster_labels is not None else 'good'
+            # Get clusters matching the labels
+            good_clusters = ksw.get_clusters_by_labels(trial, trial_labels)
             if not good_clusters:
-                print(f"No good clusters found for trial {trial}")
+                print(f"No clusters found for trial {trial} with labels {trial_labels}")
                 continue
             # Get spike data
             spike_times_all = ksw.get_spike_times(trial)
@@ -758,8 +1139,9 @@ class VonFreyAnalysis:
             recording = self.rat.analog_data[trial]
             von_frey_data = recording.get_traces(channel_ids=['ANALOG-IN-2'], return_scaled=True).flatten()
             # Calculate correlations
-            correlations, inv_isi_traces = self.compute_inv_isi_correlation_modular(
-                spike_times_good, clusters_good, fs, von_frey_data, window_size=15000
+            correlations, inv_isi_traces = self.compute_inv_isi_correlation(
+                trial,
+                window_size=15000
             )
             # Store correlation results
             trial_results['correlations'] = correlations
@@ -790,7 +1172,7 @@ class VonFreyAnalysis:
             trial_results['psth_responsive'] = psth_responsive
             trial_results['psth_details'] = psth_details
             if plot_results:
-                figures_dir = Path(self.spikes.SAVE_DIRECTORY) / 'figures' / trial
+                figures_dir = Path(self.ks_wrapper.SAVE_DIRECTORY) / 'figures' / trial
                 if save_plots:
                     figures_dir.mkdir(parents=True, exist_ok=True)
                 fig_raster = plot_raster(spike_times_good, clusters_good, fs=fs, 
@@ -853,3 +1235,52 @@ class VonFreyAnalysis:
             is_resp = pval < alpha
             results.append({'start': start, 'end': end, 'fr_in': fr_in, 'fr_base': fr_base, 'pval': pval, 'is_responsive': is_resp})
         return results
+
+    def save_results_to_excel(self, results, save_dir):
+        """
+        Save analysis results to Excel files.
+        
+        Parameters:
+        -----------
+        results : dict
+            Dictionary of results keyed by trial name
+        save_dir : Path
+            Directory to save Excel files
+        """
+        import pandas as pd
+        from pathlib import Path
+        
+        save_dir = Path(save_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        
+        for trial_name, trial_results in results.items():
+            # Save firing rates
+            if 'firing_rates' in trial_results:
+                firing_rates_df = pd.DataFrame(trial_results['firing_rates'])
+                firing_rates_df.to_excel(save_dir / f"{trial_name}_firing_rates.xlsx", index=False)
+            
+            # Save correlations
+            if 'correlations' in trial_results:
+                # Convert correlations dict to DataFrame with proper index
+                correlations = trial_results['correlations']
+                if correlations:  # Only process if we have correlations
+                    correlations_df = pd.DataFrame.from_dict(correlations, orient='index', columns=['correlation'])
+                    correlations_df.index.name = 'cluster_id'
+                    correlations_df.to_excel(save_dir / f"{trial_name}_correlations.xlsx")
+            
+            # Save average voltage
+            if 'average_voltage' in trial_results:
+                voltage_df = pd.DataFrame(trial_results['average_voltage'])
+                voltage_df.to_excel(save_dir / f"{trial_name}_average_vf_voltage_windowed.xlsx", index=False)
+            
+            # Save PSTH results if present
+            if 'psth_results' in trial_results:
+                psth_df = pd.DataFrame(trial_results['psth_results'])
+                psth_df.to_excel(save_dir / f"{trial_name}_psth_results.xlsx", index=False)
+            
+            # Save responsiveness results if present
+            if 'responsiveness' in trial_results:
+                resp_df = pd.DataFrame(trial_results['responsiveness'])
+                resp_df.to_excel(save_dir / f"{trial_name}_responsiveness.xlsx", index=False)
+        
+        print(f"[DEBUG] Saved results to {save_dir}")
